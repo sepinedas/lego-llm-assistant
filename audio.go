@@ -8,17 +8,6 @@ import (
 	"github.com/smallnest/ringbuffer"
 )
 
-type PlayerDevice struct {
-	device  *malgo.Device
-	context malgo.Context
-	buffer  *ringbuffer.RingBuffer
-}
-type RecordDevice struct {
-	device  *malgo.Device
-	c       chan []byte
-	context malgo.Context
-}
-
 func getRecorderConfig() malgo.DeviceConfig {
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
 	deviceConfig.Capture.Format = malgo.FormatS16
@@ -39,7 +28,14 @@ func getPlayerConfig() malgo.DeviceConfig {
 	return deviceConfig
 }
 
-func NewRecorder(c chan []byte, ctx malgo.Context) *RecordDevice {
+func Capture(c chan []byte) {
+	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
+		fmt.Printf("LOG <%v>\n", message)
+	})
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	onRecvFrames := func(pSample2, pSample []byte, framecount uint32) {
 		if len(pSample) > 0 {
 			c <- pSample
@@ -50,19 +46,13 @@ func NewRecorder(c chan []byte, ctx malgo.Context) *RecordDevice {
 		Data: onRecvFrames,
 	}
 
-	device, err := malgo.InitDevice(ctx, getRecorderConfig(), captureCallbacks)
+	device, err := malgo.InitDevice(ctx.Context, getRecorderConfig(), captureCallbacks)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
-	d := &RecordDevice{device, c, ctx}
-
-	return d
-}
-
-func (recorder RecordDevice) record() {
-	err := recorder.device.Start()
+	err = device.Start()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -70,7 +60,14 @@ func (recorder RecordDevice) record() {
 	fmt.Println("Recording...")
 }
 
-func NewPlayer(playBuffer *ringbuffer.RingBuffer, ctx malgo.Context) *PlayerDevice {
+func Playback(playBuffer *ringbuffer.RingBuffer) {
+	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
+		fmt.Printf("LOG <%v>\n", message)
+	})
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	onSendFrames := func(pOutput, nil []byte, framecount uint32) {
 		// Read only as much as malgo needs for this frame
 		n, _ := playBuffer.Read(pOutput)
@@ -87,18 +84,13 @@ func NewPlayer(playBuffer *ringbuffer.RingBuffer, ctx malgo.Context) *PlayerDevi
 		Data: onSendFrames,
 	}
 
-	device, err := malgo.InitDevice(ctx, getPlayerConfig(), playbackCallbacks)
+	device, err := malgo.InitDevice(ctx.Context, getPlayerConfig(), playbackCallbacks)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	d := &PlayerDevice{device, ctx, playBuffer}
 
-	return d
-}
-
-func (player PlayerDevice) start() {
-	err := player.device.Start()
+	err = device.Start()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
