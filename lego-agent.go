@@ -13,7 +13,7 @@ import (
 func main() {
 	ctx := context.Background()
 	cMic := make(chan []byte)
-	rb := ringbuffer.New(1024 * 512)
+	rb := ringbuffer.New(1024 * 1024)
 
 	Capture(cMic)
 	Playback(rb)
@@ -46,14 +46,16 @@ func main() {
 
 	for {
 		data := <-cMic
-		err := session.SendRealtimeInput(genai.LiveRealtimeInput{
-			Audio: &genai.Blob{
-				MIMEType: "audio/pcm;rate=16000",
-				Data:     data,
-			},
-		})
-		if err != nil {
-			log.Printf("Error sending audio: %v", err)
+		if rb.IsEmpty() {
+			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+				Audio: &genai.Blob{
+					MIMEType: "audio/pcm;rate=16000",
+					Data:     data,
+				},
+			})
+			if err != nil {
+				log.Printf("Error sending audio: %v", err)
+			}
 		}
 	}
 }
