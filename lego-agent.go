@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/smallnest/ringbuffer"
 	"google.golang.org/genai"
@@ -12,7 +14,9 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cMic := make(chan []byte)
 	rb := ringbuffer.New(1024 * 1024)
 
@@ -28,8 +32,10 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	showActive(true)
 	defer session.Close()
+
+	showActive(true)
+	defer showActive(false)
 
 	go func() {
 		for {
@@ -50,18 +56,24 @@ func main() {
 		}
 	}()
 
-	for {
-		data := <-cMic
-		if rb.IsEmpty() {
-			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
-				Audio: &genai.Blob{
-					MIMEType: "audio/pcm;rate=16000",
-					Data:     data,
-				},
-			})
-			if err != nil {
-				log.Printf("Error sending audio: %v", err)
+	func() {
+		for {
+			select {
+			case data := <-cMic:
+				if rb.IsEmpty() {
+					err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+						Audio: &genai.Blob{
+							MIMEType: "audio/pcm;rate=16000",
+							Data:     data,
+						},
+					})
+					if err != nil {
+						log.Printf("Error sending audio: %v", err)
+					}
+				}
+			case <-ctx.Done():
+				return
 			}
 		}
-	}
+	}()
 }

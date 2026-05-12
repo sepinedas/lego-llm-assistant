@@ -7,8 +7,8 @@ import (
 
 func showActive(active bool) {
 	if active {
-		rpi.P1_37.Out(gpio.High)
+		rpi.P1_38.Out(gpio.High)
 	} else {
-		rpi.P1_37.Out(gpio.Low)
+		rpi.P1_38.Out(gpio.Low)
 	}
 }
