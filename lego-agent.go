@@ -8,12 +8,17 @@ import (
 
 	"github.com/smallnest/ringbuffer"
 	"google.golang.org/genai"
+	"periph.io/x/host/v3"
 )
 
 func main() {
 	ctx := context.Background()
 	cMic := make(chan []byte)
 	rb := ringbuffer.New(1024 * 1024)
+
+	if _, err := host.Init(); err != nil {
+		log.Fatal(err)
+	}
 
 	Capture(cMic)
 	Playback(rb)
@@ -23,6 +28,7 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+	showActive(true)
 	defer session.Close()
 
 	go func() {
