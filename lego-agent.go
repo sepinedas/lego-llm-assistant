@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
+	"time"
 
 	"github.com/smallnest/ringbuffer"
 	"google.golang.org/genai"
@@ -14,11 +13,10 @@ import (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx := context.Background()
 
 	cMic := make(chan []byte)
-	rb := ringbuffer.New(1024 * 1024)
+	rb := ringbuffer.New(1024 * 2048)
 
 	if _, err := host.Init(); err != nil {
 		log.Fatal(err)
@@ -26,6 +24,10 @@ func main() {
 
 	Capture(cMic)
 	Playback(rb)
+	timer := time.NewTimer(0)
+
+	rec := VoskRecognizer()
+	isSpeechEnabled := false
 
 	session, err := Session(ctx)
 	if err != nil {
@@ -56,24 +58,53 @@ func main() {
 		}
 	}()
 
-	func() {
+	go func() {
 		for {
-			select {
-			case data := <-cMic:
-				if rb.IsEmpty() {
-					err := session.SendRealtimeInput(genai.LiveRealtimeInput{
-						Audio: &genai.Blob{
-							MIMEType: "audio/pcm;rate=16000",
-							Data:     data,
-						},
-					})
-					if err != nil {
-						log.Printf("Error sending audio: %v", err)
+			if !rb.IsEmpty() {
+				fmt.Println("Stop timer.")
+				// 1. Stop the timer and check if it was already expired/stopped
+				if !timer.Stop() {
+					// 2. Drain the channel if it was not drained yet
+					select {
+					case <-timer.C:
+					default:
 					}
 				}
-			case <-ctx.Done():
-				return
+
+				for !rb.IsEmpty() {
+				}
+
+				timer.Reset(10 * time.Second)
 			}
 		}
 	}()
+
+	go func() {
+		for {
+			<-timer.C
+			fmt.Println("Speech disabled.")
+			isSpeechEnabled = false
+		}
+	}()
+
+	for {
+		data := <-cMic
+		if rb.IsEmpty() && isSpeechEnabled {
+			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+				Audio: &genai.Blob{
+					MIMEType: "audio/pcm;rate=16000",
+					Data:     data,
+				},
+			})
+			if err != nil {
+				log.Printf("Error sending audio: %v", err)
+			}
+		} else {
+			Recognize(rec, data, func() {
+				fmt.Println("Speech enabled.")
+				isSpeechEnabled = true
+				timer.Reset(10 * time.Second)
+			})
+		}
+	}
 }
