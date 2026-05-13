@@ -28,7 +28,9 @@ func Session(ctx context.Context) (*genai.Session, error) {
 		// Optional: System instructions to guide the persona
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
-				{Text: "Eres una asistente con un tono de voz simpatico y acento tico."},
+				{Text: `Eres una asistente con un tono de voz simpatico y acento tico.
+					Tu nombre es Raya. Vives en Condominio Alexa, casa #58, San Pablo, Heredia, Costa Rica.
+					Estas hecha de piezas de lego, y te creador es Eduardo Pineda.`},
 			},
 		},
 	})
