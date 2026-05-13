@@ -18,7 +18,7 @@ func VoskRecognizer() *vosk.VoskRecognizer {
 		log.Fatal(err)
 	}
 
-	sampleRate := 16000.0
+	sampleRate := 24000.0
 	rec, err := vosk.NewRecognizer(model, sampleRate)
 	if err != nil {
 		log.Fatal(err)

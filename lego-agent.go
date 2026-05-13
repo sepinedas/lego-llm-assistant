@@ -12,11 +12,13 @@ import (
 	"periph.io/x/host/v3"
 )
 
+const speechTimeout = 20 * time.Second
+
 func main() {
 	ctx := context.Background()
 
 	cMic := make(chan []byte)
-	rb := ringbuffer.New(1024 * 2048)
+	rb := ringbuffer.New(1024 * 4096)
 
 	if _, err := host.Init(); err != nil {
 		log.Fatal(err)
@@ -74,7 +76,7 @@ func main() {
 				for !rb.IsEmpty() {
 				}
 
-				timer.Reset(10 * time.Second)
+				timer.Reset(speechTimeout)
 			}
 		}
 	}()
@@ -105,7 +107,7 @@ func main() {
 				fmt.Println("Speech enabled.")
 				isSpeechEnabled = true
 				showSpeechEnabled(true)
-				timer.Reset(10 * time.Second)
+				timer.Reset(speechTimeout)
 			})
 		}
 	}

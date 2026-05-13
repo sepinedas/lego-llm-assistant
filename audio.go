@@ -12,7 +12,7 @@ func getRecorderConfig() malgo.DeviceConfig {
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
 	deviceConfig.Capture.Format = malgo.FormatS16
 	deviceConfig.Capture.Channels = 1
-	deviceConfig.SampleRate = 16000
+	deviceConfig.SampleRate = 24000
 	deviceConfig.Alsa.NoMMap = 1
 
 	return deviceConfig
