@@ -12,3 +12,11 @@ func showActive(active bool) {
 		rpi.P1_38.Out(gpio.Low)
 	}
 }
+
+func showSpeechEnabled(active bool) {
+	if active {
+		rpi.P1_36.Out(gpio.High)
+	} else {
+		rpi.P1_36.Out(gpio.Low)
+	}
+}

@@ -41,7 +41,7 @@ func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
 
 		fmt.Println(response.Text)
 
-		if response.Text == "lola" || response.Text == "lo la" {
+		if response.Text == "raya" {
 			cb()
 		}
 	}

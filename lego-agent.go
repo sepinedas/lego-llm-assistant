@@ -84,6 +84,7 @@ func main() {
 			<-timer.C
 			fmt.Println("Speech disabled.")
 			isSpeechEnabled = false
+			showSpeechEnabled(false)
 		}
 	}()
 
@@ -103,6 +104,7 @@ func main() {
 			Recognize(rec, data, func() {
 				fmt.Println("Speech enabled.")
 				isSpeechEnabled = true
+				showSpeechEnabled(true)
 				timer.Reset(10 * time.Second)
 			})
 		}
