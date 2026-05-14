@@ -25,7 +25,7 @@ func main() {
 	rb := ringbuffer.New(1024 * 4096)
 
 	if _, err := host.Init(); err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	Playback(rb)
@@ -36,7 +36,7 @@ func main() {
 
 	session, err := Session(ctx)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	defer session.Close()
 
@@ -79,7 +79,7 @@ func main() {
 				response, err := session.Receive()
 				if err != nil {
 					// Log fatal error if receiving from the GenAI service fails (e.g., connection closed, network error).
-					log.Fatal("receive model response error: ", err)
+					log.Panic("receive model response error: ", err)
 				}
 
 				if response.ServerContent != nil && response.ServerContent.ModelTurn != nil {

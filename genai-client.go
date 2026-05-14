@@ -12,7 +12,7 @@ func Session(ctx context.Context) (*genai.Session, error) {
 	client, err := genai.NewClient(ctx, nil)
 	if err != nil {
 		// Log fatal error if client creation fails (e.g., invalid config, authentication issues).
-		log.Fatal("create client error: ", err)
+		log.Panic("create client error: ", err)
 		return nil, err
 	}
 
@@ -30,13 +30,14 @@ func Session(ctx context.Context) (*genai.Session, error) {
 			Parts: []*genai.Part{
 				{Text: `Eres una asistente con un tono de voz simpatico y acento tico.
 					Tu nombre es Maya. Vives en Condominio Alexa, casa #58, San Pablo, Heredia, Costa Rica.
+					Tu ubicacion es Costa Rica, zona horaria GMT-6.
 					Estas hecha de piezas de lego, y tu creador es Eduardo Pineda.`},
 			},
 		},
 	})
 	if err != nil {
 		// Log fatal error if connecting to the model fails (e.g., network issues, invalid model name).
-		log.Fatal("connect to model error: ", err)
+		log.Panic("connect to model error: ", err)
 	}
 
 	return session, nil
