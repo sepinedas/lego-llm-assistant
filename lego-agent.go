@@ -31,7 +31,7 @@ func main() {
 	Playback(rb)
 	timer := time.NewTimer(0)
 
-	rec := VoskRecognizer(48000)
+	rec := VoskRecognizer(InputSampleRate)
 	isSpeechEnabled := false
 
 	session, err := Session(ctx)
@@ -44,7 +44,7 @@ func main() {
 		if rb.IsEmpty() && isSpeechEnabled {
 			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
 				Audio: &genai.Blob{
-					MIMEType: "audio/pcm;rate=48000",
+					MIMEType: "audio/pcm;rate=16000",
 					Data:     data,
 				},
 			})
@@ -52,7 +52,7 @@ func main() {
 				log.Printf("Error sending audio: %v", err)
 			}
 		} else {
-			Recognize(rec, data, func() {
+			Recognize(rec, IncreaseVolumeBytes(data, 1.5), func() {
 				fmt.Println("Speech enabled.")
 				isSpeechEnabled = true
 				showSpeechEnabled(true)
@@ -60,10 +60,11 @@ func main() {
 			})
 		}
 	}
-	Capture(handleInputAudio, 48000)
+	Capture(handleInputAudio, InputSampleRate)
 
 	showActive(true)
 	defer showActive(false)
+	defer showSpeechEnabled(false)
 
 	wg.Add(1)
 	go func() {
