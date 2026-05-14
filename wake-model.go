@@ -18,7 +18,8 @@ func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
 		log.Fatal(err)
 	}
 
-	rec, err := vosk.NewRecognizer(model, sampleRate)
+	grammarJSON := `["maya"]`
+	rec, err := vosk.NewRecognizerGrm(model, sampleRate, []byte(grammarJSON))
 	if err != nil {
 		log.Fatal(err)
 	}
