@@ -52,7 +52,7 @@ func main() {
 				log.Printf("Error sending audio: %v", err)
 			}
 		} else {
-			Recognize(rec, IncreaseVolumeBytes(data, 2.5), func() {
+			Recognize(rec, IncreaseVolumeBytes(data, 1.5), func() {
 				fmt.Println("Speech enabled.")
 				isSpeechEnabled = true
 				showSpeechEnabled(true)

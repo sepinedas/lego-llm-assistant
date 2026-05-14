@@ -30,7 +30,7 @@ func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
 
 func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
 	if rec.AcceptWaveform(data) != 0 {
-		res := rec.Result()
+		res := rec.FinalResult()
 
 		// 2. Parse the JSON
 		var response VoskResponse
@@ -39,7 +39,7 @@ func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
 			return
 		}
 
-		fmt.Println(response.Text)
+		fmt.Println(string(res))
 
 		if response.Text == "maya" {
 			cb()
