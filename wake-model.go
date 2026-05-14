@@ -30,7 +30,7 @@ func VoskRecognizer() *vosk.VoskRecognizer {
 
 func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
 	if rec.AcceptWaveform(data) != 0 {
-		res := rec.FinalResult()
+		res := rec.Result()
 
 		// 2. Parse the JSON
 		var response VoskResponse
