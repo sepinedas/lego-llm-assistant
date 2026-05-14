@@ -1,11 +1,14 @@
 module github.com/sepinedas/lego-llm-assistant
 
-go 1.24
+go 1.24.6
 
 require (
 	github.com/gen2brain/malgo v0.11.24
+	github.com/hekt/vosk-api/go v0.3.42-mod1
 	github.com/smallnest/ringbuffer v0.1.1
 	google.golang.org/genai v1.56.0
+	periph.io/x/conn/v3 v3.7.2
+	periph.io/x/host/v3 v3.8.5
 )
 
 require (
@@ -17,7 +20,6 @@ require (
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/hekt/vosk-api/go v0.3.42-mod1 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/net v0.38.0 // indirect
@@ -26,6 +28,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
-	periph.io/x/conn/v3 v3.7.2 // indirect
-	periph.io/x/host/v3 v3.8.5 // indirect
 )

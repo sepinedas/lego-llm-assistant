@@ -8,11 +8,11 @@ import (
 	"github.com/smallnest/ringbuffer"
 )
 
-func getRecorderConfig() malgo.DeviceConfig {
+func getRecorderConfig(sampleRate uint32) malgo.DeviceConfig {
 	deviceConfig := malgo.DefaultDeviceConfig(malgo.Capture)
 	deviceConfig.Capture.Format = malgo.FormatS16
 	deviceConfig.Capture.Channels = 1
-	deviceConfig.SampleRate = 24000
+	deviceConfig.SampleRate = sampleRate
 	deviceConfig.Alsa.NoMMap = 1
 
 	return deviceConfig
@@ -28,7 +28,7 @@ func getPlayerConfig() malgo.DeviceConfig {
 	return deviceConfig
 }
 
-func Capture(c chan []byte) {
+func Capture(cb func([]byte, uint32), sampleRate uint32) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		fmt.Printf("LOG <%v>\n", message)
 	})
@@ -38,7 +38,7 @@ func Capture(c chan []byte) {
 	}
 	onRecvFrames := func(pSample2, pSample []byte, framecount uint32) {
 		if len(pSample) > 0 {
-			c <- pSample
+			cb(pSample, framecount)
 		}
 	}
 
@@ -46,7 +46,7 @@ func Capture(c chan []byte) {
 		Data: onRecvFrames,
 	}
 
-	device, err := malgo.InitDevice(ctx.Context, getRecorderConfig(), captureCallbacks)
+	device, err := malgo.InitDevice(ctx.Context, getRecorderConfig(sampleRate), captureCallbacks)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)

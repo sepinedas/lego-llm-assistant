@@ -22,18 +22,16 @@ func main() {
 	defer stop()
 	var wg sync.WaitGroup
 
-	cMic := make(chan []byte)
 	rb := ringbuffer.New(1024 * 4096)
 
 	if _, err := host.Init(); err != nil {
 		log.Fatal(err)
 	}
 
-	Capture(cMic)
 	Playback(rb)
 	timer := time.NewTimer(0)
 
-	rec := VoskRecognizer()
+	rec := VoskRecognizer(48000)
 	isSpeechEnabled := false
 
 	session, err := Session(ctx)
@@ -41,6 +39,28 @@ func main() {
 		log.Fatal(err)
 	}
 	defer session.Close()
+
+	handleInputAudio := func(data []byte, framecount uint32) {
+		if rb.IsEmpty() && isSpeechEnabled {
+			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+				Audio: &genai.Blob{
+					MIMEType: "audio/pcm;rate=48000",
+					Data:     data,
+				},
+			})
+			if err != nil {
+				log.Printf("Error sending audio: %v", err)
+			}
+		} else {
+			Recognize(rec, data, func() {
+				fmt.Println("Speech enabled.")
+				isSpeechEnabled = true
+				showSpeechEnabled(true)
+				timer.Reset(speechTimeout)
+			})
+		}
+	}
+	Capture(handleInputAudio, 48000)
 
 	showActive(true)
 	defer showActive(false)
@@ -112,37 +132,6 @@ func main() {
 				fmt.Println("Speech disabled.")
 				isSpeechEnabled = false
 				showSpeechEnabled(false)
-			}
-		}
-	}()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-
-			case data := <-cMic:
-				if rb.IsEmpty() && isSpeechEnabled {
-					err := session.SendRealtimeInput(genai.LiveRealtimeInput{
-						Audio: &genai.Blob{
-							MIMEType: "audio/pcm;rate=16000",
-							Data:     data,
-						},
-					})
-					if err != nil {
-						log.Printf("Error sending audio: %v", err)
-					}
-				} else {
-					Recognize(rec, data, func() {
-						fmt.Println("Speech enabled.")
-						isSpeechEnabled = true
-						showSpeechEnabled(true)
-						timer.Reset(speechTimeout)
-					})
-				}
 			}
 		}
 	}()

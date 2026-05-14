@@ -12,13 +12,12 @@ type VoskResponse struct {
 	Text string `json:"text"`
 }
 
-func VoskRecognizer() *vosk.VoskRecognizer {
+func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
 	model, err := vosk.NewModel("model")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	sampleRate := 24000.0
 	rec, err := vosk.NewRecognizer(model, sampleRate)
 	if err != nil {
 		log.Fatal(err)
