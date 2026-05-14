@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/smallnest/ringbuffer"
@@ -15,7 +18,9 @@ import (
 const speechTimeout = 20 * time.Second
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var wg sync.WaitGroup
 
 	cMic := make(chan []byte)
 	rb := ringbuffer.New(1024 * 4096)
@@ -33,82 +38,133 @@ func main() {
 
 	session, err := Session(ctx)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		log.Fatal(err)
 	}
 	defer session.Close()
 
 	showActive(true)
 	defer showActive(false)
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
-			// Receive the next message from the GenAI service session.
-			response, err := session.Receive()
-			if err != nil {
-				// Log fatal error if receiving from the GenAI service fails (e.g., connection closed, network error).
-				log.Fatal("receive model response error: ", err)
-			}
+			select {
+			case <-ctx.Done():
+				fmt.Println("Stop session")
+				return
+			default:
+				// Receive the next message from the GenAI service session.
+				response, err := session.Receive()
+				if err != nil {
+					// Log fatal error if receiving from the GenAI service fails (e.g., connection closed, network error).
+					log.Fatal("receive model response error: ", err)
+				}
 
-			if response.ServerContent != nil && response.ServerContent.ModelTurn != nil {
-				for _, part := range response.ServerContent.ModelTurn.Parts {
-					if part.InlineData != nil {
-						rb.Write(part.InlineData.Data)
+				if response.ServerContent != nil && response.ServerContent.ModelTurn != nil {
+					for _, part := range response.ServerContent.ModelTurn.Parts {
+						if part.InlineData != nil {
+							rb.Write(part.InlineData.Data)
+						}
 					}
 				}
 			}
 		}
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
-			if !rb.IsEmpty() {
-				fmt.Println("Stop timer.")
-				// 1. Stop the timer and check if it was already expired/stopped
-				if !timer.Stop() {
-					// 2. Drain the channel if it was not drained yet
-					select {
-					case <-timer.C:
-					default:
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if !rb.IsEmpty() {
+					fmt.Println("Stop timer.")
+					// 1. Stop the timer and check if it was already expired/stopped
+					if !timer.Stop() {
+						// 2. Drain the channel if it was not drained yet
+						select {
+						case <-timer.C:
+						default:
+						}
 					}
-				}
 
-				for !rb.IsEmpty() {
-				}
+					for !rb.IsEmpty() {
+					}
 
-				timer.Reset(speechTimeout)
+					timer.Reset(speechTimeout)
+				}
 			}
 		}
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
-			<-timer.C
-			fmt.Println("Speech disabled.")
-			isSpeechEnabled = false
-			showSpeechEnabled(false)
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-timer.C:
+				fmt.Println("Speech disabled.")
+				isSpeechEnabled = false
+				showSpeechEnabled(false)
+			}
 		}
 	}()
 
-	for {
-		data := <-cMic
-		if rb.IsEmpty() && isSpeechEnabled {
-			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
-				Audio: &genai.Blob{
-					MIMEType: "audio/pcm;rate=16000",
-					Data:     data,
-				},
-			})
-			if err != nil {
-				log.Printf("Error sending audio: %v", err)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case data := <-cMic:
+				if rb.IsEmpty() && isSpeechEnabled {
+					err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+						Audio: &genai.Blob{
+							MIMEType: "audio/pcm;rate=16000",
+							Data:     data,
+						},
+					})
+					if err != nil {
+						log.Printf("Error sending audio: %v", err)
+					}
+				} else {
+					Recognize(rec, data, func() {
+						fmt.Println("Speech enabled.")
+						isSpeechEnabled = true
+						showSpeechEnabled(true)
+						timer.Reset(speechTimeout)
+					})
+				}
 			}
-		} else {
-			Recognize(rec, data, func() {
-				fmt.Println("Speech enabled.")
-				isSpeechEnabled = true
-				showSpeechEnabled(true)
-				timer.Reset(speechTimeout)
-			})
 		}
+	}()
+
+	<-ctx.Done()
+	fmt.Println("\nShutdown signal received. Waiting for workers to finish...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Channel to signal when all workers are done
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	// 5. Select between workers finishing or the timeout expiring
+	select {
+	case <-done:
+		fmt.Println("Main: all workers finished gracefully.")
+	case <-shutdownCtx.Done():
+		fmt.Println("Main: shutdown timed out, forcing exit.")
 	}
 }
