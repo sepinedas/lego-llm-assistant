@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	vosk "github.com/hekt/vosk-api/go"
 )
@@ -13,7 +14,8 @@ type VoskResponse struct {
 }
 
 func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
-	model, err := vosk.NewModel("model")
+	modelPath := os.Getenv("VOSK_MODEL")
+	model, err := vosk.NewModel(modelPath)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -38,8 +40,6 @@ func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
 			fmt.Println("Error parsing JSON:", err)
 			return
 		}
-
-		fmt.Println(string(res))
 
 		if response.Text == "maya" {
 			cb()
