@@ -30,7 +30,6 @@ func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end
 			Parts: []*genai.Part{
 				{Text: `Eres una asistente con un tono de voz simpatico y acento tico.
 					Tu nombre es Maya. Vives en Condominio Alexa, casa #58, San Pablo, Heredia, Costa Rica.
-					Tu ubicacion es Costa Rica, zona horaria GMT-6.
 					Estas hecha de piezas de lego, y tu creador es Eduardo Pineda.`},
 			},
 		},
@@ -54,7 +53,6 @@ func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end
 				})
 				if err != nil {
 					log.Printf("Error sending audio: %v", err)
-					return
 				}
 			case <-ctx.Done():
 				session.Close()
@@ -67,6 +65,9 @@ func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end
 		for {
 			select {
 			case <-ctx.Done():
+				session.Close()
+				return
+			case <-end:
 				session.Close()
 				return
 			default:

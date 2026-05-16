@@ -20,7 +20,7 @@ func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
 		log.Panic(err)
 	}
 
-	grammarJSON := `["maya"]`
+	grammarJSON := `["maya", "alto"]`
 	rec, err := vosk.NewRecognizerGrm(model, sampleRate, []byte(grammarJSON))
 	if err != nil {
 		log.Panic(err)
@@ -30,7 +30,7 @@ func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
 	return rec
 }
 
-func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
+func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func(string)) {
 	if rec.AcceptWaveform(data) != 0 {
 		res := rec.FinalResult()
 
@@ -41,8 +41,6 @@ func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func()) {
 			return
 		}
 
-		if response.Text == "maya" {
-			cb()
-		}
+		cb(response.Text)
 	}
 }
