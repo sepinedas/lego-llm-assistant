@@ -38,25 +38,21 @@ func main() {
 	handleInputAudio := func(data []byte, framecount uint32) {
 		if rb.IsEmpty() && isSpeechEnabled {
 			inAudio <- data
-		}
-		Recognize(rec, IncreaseVolumeBytes(data, 1.5), func(text string) {
-			if text == "maya" {
-				fmt.Println("Speech enabled.")
-				isSpeechEnabled = true
-				showSpeechEnabled(true)
-				timer.Reset(speechTimeout)
+		} else {
+			Recognize(rec, IncreaseVolumeBytes(data, 1.5), func(text string) {
+				if text == "maya" {
+					fmt.Println("Speech enabled.")
+					isSpeechEnabled = true
+					showSpeechEnabled(true)
+					// timer.Reset(speechTimeout)
 
-				select {
-				case startSession <- true:
-				default:
+					select {
+					case startSession <- true:
+					default:
+					}
 				}
-			}
-			if text == "alto" {
-				fmt.Println("Alto")
-				endSession <- true
-				rb.Reset()
-			}
-		})
+			})
+		}
 	}
 	Capture(handleInputAudio, InputSampleRate)
 
@@ -86,7 +82,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			default:
-				if !rb.IsEmpty() || isSpeechEnabled {
+				if !rb.IsEmpty() {
 					// 1. Stop the timer and check if it was already expired/stopped
 					if !timer.Stop() {
 						// 2. Drain the channel if it was not drained yet
@@ -96,7 +92,7 @@ func main() {
 						}
 					}
 
-					for !rb.IsEmpty() || isSpeechEnabled {
+					for !rb.IsEmpty() {
 					}
 
 					timer.Reset(speechTimeout)
