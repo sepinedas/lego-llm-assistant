@@ -70,6 +70,7 @@ func main() {
 				go func() {
 					endSession <- true
 					enableSpeech(false)
+					showCommandEnabled(false)
 					rb.Reset()
 				}()
 			}
@@ -78,6 +79,7 @@ func main() {
 	Capture(handleInputAudio, InputSampleRate)
 
 	defer showSpeechEnabled(false)
+	defer showCommandEnabled(false)
 
 	go func() {
 		for {
@@ -103,6 +105,7 @@ func main() {
 				return
 			case <-timer.C:
 				isCommandOpen = false
+				showCommandEnabled(false)
 			}
 		}
 	}()

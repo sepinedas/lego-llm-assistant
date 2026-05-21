@@ -7,16 +7,16 @@ import (
 
 func showCommandEnabled(active bool) {
 	if active {
-		rpi.P1_32.Out(gpio.High)
+		rpi.P1_33.Out(gpio.High)
 	} else {
-		rpi.P1_32.Out(gpio.Low)
+		rpi.P1_33.Out(gpio.Low)
 	}
 }
 
 func showSpeechEnabled(active bool) {
 	if active {
-		rpi.P1_33.Out(gpio.High)
+		rpi.P1_32.Out(gpio.High)
 	} else {
-		rpi.P1_33.Out(gpio.Low)
+		rpi.P1_32.Out(gpio.Low)
 	}
 }
