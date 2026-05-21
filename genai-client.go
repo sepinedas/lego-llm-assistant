@@ -8,7 +8,7 @@ import (
 	"google.golang.org/genai"
 )
 
-func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end chan bool) error {
+func Session(ctx context.Context, onResponse func(data []byte), audio <-chan []byte, end chan bool) error {
 	model := "gemini-3.1-flash-live-preview"
 	client, err := genai.NewClient(ctx, nil)
 	if err != nil {
@@ -43,6 +43,7 @@ func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end
 		for {
 			select {
 			case <-end:
+				session.Close()
 				return
 			case data := <-audio:
 				err := session.SendRealtimeInput(genai.LiveRealtimeInput{
@@ -53,6 +54,7 @@ func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end
 				})
 				if err != nil {
 					log.Printf("Error sending audio: %v", err)
+					end <- true
 				}
 			case <-ctx.Done():
 				session.Close()
@@ -87,7 +89,7 @@ func Session(ctx context.Context, cb func(data []byte), audio <-chan []byte, end
 				if response.ServerContent != nil && response.ServerContent.ModelTurn != nil {
 					for _, part := range response.ServerContent.ModelTurn.Parts {
 						if part.InlineData != nil {
-							cb(part.InlineData.Data)
+							onResponse(part.InlineData.Data)
 						}
 					}
 				}

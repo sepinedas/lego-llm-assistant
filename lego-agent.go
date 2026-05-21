@@ -13,7 +13,7 @@ import (
 	"periph.io/x/host/v3"
 )
 
-const speechTimeout = 10 * time.Second
+const commandTimeout = 5 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -25,34 +25,54 @@ func main() {
 		log.Panic(err)
 	}
 
-	Playback(rb)
+	rec := VoskRecognizer(InputSampleRate)
+	isMicOpen := false
+	isCommandOpen := false
+
 	timer := time.NewTimer(0)
 
-	rec := VoskRecognizer(InputSampleRate)
-	isSpeechEnabled := false
+	Playback(rb, &isCommandOpen)
 
 	endSession := make(chan bool)
 	inAudio := make(chan []byte, 1)
 	startSession := make(chan bool)
 
-	handleInputAudio := func(data []byte, framecount uint32) {
-		if rb.IsEmpty() && isSpeechEnabled {
-			inAudio <- data
-		} else {
-			Recognize(rec, IncreaseVolumeBytes(data, 1.5), func(text string) {
-				if text == "maya" {
-					fmt.Println("Speech enabled.")
-					isSpeechEnabled = true
-					showSpeechEnabled(true)
-					// timer.Reset(speechTimeout)
-
-					select {
-					case startSession <- true:
-					default:
-					}
-				}
-			})
+	enableSpeech := func(active bool) {
+		if isMicOpen && active {
+			isCommandOpen = true
+			timer.Reset(commandTimeout)
+			fmt.Println("Command enabled.")
 		}
+		showActive(active)
+		if active {
+			fmt.Println("Speech enabled.")
+		} else {
+			fmt.Println("Speech disabled.")
+		}
+		isMicOpen = active
+	}
+
+	handleInputAudio := func(data []byte, framecount uint32) {
+		if rb.IsEmpty() && isMicOpen {
+			inAudio <- data
+		}
+		Recognize(rec, data, func(text string) {
+			if text == "maya" {
+				enableSpeech(true)
+
+				select {
+				case startSession <- true:
+				default:
+				}
+			}
+			if (text == "alto" || text == "adios") && isCommandOpen {
+				go func() {
+					endSession <- true
+					enableSpeech(false)
+					rb.Reset()
+				}()
+			}
+		})
 	}
 	Capture(handleInputAudio, InputSampleRate)
 
@@ -70,6 +90,7 @@ func main() {
 				}
 				fmt.Println("Opening new session.")
 				<-endSession
+				fmt.Println("Closing session.")
 			case <-ctx.Done():
 				return
 			}
@@ -81,36 +102,8 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				if !rb.IsEmpty() {
-					// 1. Stop the timer and check if it was already expired/stopped
-					if !timer.Stop() {
-						// 2. Drain the channel if it was not drained yet
-						select {
-						case <-timer.C:
-						default:
-						}
-					}
-
-					for !rb.IsEmpty() {
-					}
-
-					timer.Reset(speechTimeout)
-				}
-			}
-		}
-	}()
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-
 			case <-timer.C:
-				fmt.Println("Speech disabled.")
-				isSpeechEnabled = false
-				showSpeechEnabled(false)
+				isCommandOpen = false
 			}
 		}
 	}()

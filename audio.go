@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
-	"math"
 	"os"
 
 	"github.com/gen2brain/malgo"
@@ -67,7 +65,7 @@ func Capture(cb func([]byte, uint32), sampleRate uint32) {
 	fmt.Println("Recording...")
 }
 
-func Playback(playBuffer *ringbuffer.RingBuffer) {
+func Playback(playBuffer *ringbuffer.RingBuffer, isCommandOpen *bool) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		fmt.Printf("LOG <%v>\n", message)
 	})
@@ -77,12 +75,14 @@ func Playback(playBuffer *ringbuffer.RingBuffer) {
 	}
 	onSendFrames := func(pOutput, nil []byte, framecount uint32) {
 		// Read only as much as malgo needs for this frame
-		n, _ := playBuffer.Read(pOutput)
+		if !(*isCommandOpen) {
+			n, _ := playBuffer.Read(pOutput)
 
-		// Fill remaining with silence if buffer is empty to avoid noise
-		if n < len(pOutput) {
-			for i := n; i < len(pOutput); i++ {
-				pOutput[i] = 0
+			// Fill remaining with silence if buffer is empty to avoid noise
+			if n < len(pOutput) {
+				for i := n; i < len(pOutput); i++ {
+					pOutput[i] = 0
+				}
 			}
 		}
 	}
@@ -103,31 +103,4 @@ func Playback(playBuffer *ringbuffer.RingBuffer) {
 		os.Exit(1)
 	}
 	fmt.Println("Playing...")
-}
-
-func IncreaseVolumeBytes(b []byte, factor float64) []byte {
-	// 16-bit audio requires 2 bytes per sample
-	for i := 0; i < len(b); i += 2 {
-		// Prevent out-of-bounds if the byte slice has an odd length
-		if i+1 >= len(b) {
-			break
-		}
-
-		// 1. Read 2 bytes into a uint16 and cast to signed int16
-		sample := int16(binary.LittleEndian.Uint16(b[i : i+2]))
-
-		// 2. Scale the sample amplitude
-		newVal := float64(sample) * factor
-
-		// 3. Clip values to prevent harsh digital distortion
-		if newVal > math.MaxInt16 {
-			newVal = math.MaxInt16
-		} else if newVal < math.MinInt16 {
-			newVal = math.MinInt16
-		}
-
-		// 4. Write back the updated sample as 2 bytes
-		binary.LittleEndian.PutUint16(b[i:i+2], uint16(int16(newVal)))
-	}
-	return b
 }
