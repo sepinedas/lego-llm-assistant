@@ -25,8 +25,6 @@ func main() {
 		log.Panic(err)
 	}
 
-	fadingLED()
-
 	rec := VoskRecognizer(InputSampleRate)
 	isMicOpen := false
 	isCommandOpen := false
@@ -44,8 +42,9 @@ func main() {
 			isCommandOpen = true
 			timer.Reset(commandTimeout)
 			fmt.Println("Command enabled.")
+			showCommandEnabled(true)
 		}
-		showActive(active)
+		showSpeechEnabled(active)
 		if active {
 			fmt.Println("Speech enabled.")
 		} else {
@@ -78,8 +77,6 @@ func main() {
 	}
 	Capture(handleInputAudio, InputSampleRate)
 
-	showActive(true)
-	defer showActive(false)
 	defer showSpeechEnabled(false)
 
 	go func() {
