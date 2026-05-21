@@ -25,6 +25,8 @@ func main() {
 		log.Panic(err)
 	}
 
+	fadingLED()
+
 	rec := VoskRecognizer(InputSampleRate)
 	isMicOpen := false
 	isCommandOpen := false
