@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"time"
 
 	"periph.io/x/conn/v3/gpio"
@@ -121,4 +122,113 @@ func (d *GC9A01) InitLCD() error {
 
 	time.Sleep(120 * time.Millisecond)
 	return d.WriteCommand(0x29) // Display On
+}
+
+func (d *GC9A01) SetWindow(x0, y0, x1, y1 uint16) {
+	d.WriteCommand(0x2A) // Column
+	d.WriteData([]byte{byte(x0 >> 8), byte(x0), byte(x1 >> 8), byte(x1)})
+
+	d.WriteCommand(0x2B) // Row
+	d.WriteData([]byte{byte(y0 >> 8), byte(y0), byte(y1 >> 8), byte(y1)})
+
+	d.WriteCommand(0x2C) // Memory Write
+}
+
+type PixelBuffer struct {
+	Width  int
+	Height int
+	Buf    []byte
+}
+
+// NewPixelBuffer allocates memory for a full frame
+func NewPixelBuffer(w, h int) *PixelBuffer {
+	return &PixelBuffer{
+		Width:  w,
+		Height: h,
+		Buf:    make([]byte, w*h*2),
+	}
+}
+
+// SetPixel converts R, G, B (0-255) to RGB565 and updates the buffer index
+func (pb *PixelBuffer) SetPixel(x, y int, r, g, b byte) {
+	if x < 0 || x >= pb.Width || y < 0 || y >= pb.Height {
+		return // Out of bounds safety check
+	}
+
+	// Pack RGB888 into RGB565 (16-bit integer)
+	// Red: 5 bits, Green: 6 bits, Blue: 5 bits
+	rgb565 := uint16(r&0xF8)<<8 | uint16(g&0xFC)<<3 | uint16(b&0xF8)>>3
+
+	// Calculate buffer target byte index
+	idx := (y*pb.Width + x) * 2
+
+	// Screen expects Big-Endian bytes (High byte first)
+	pb.Buf[idx] = byte(rgb565 >> 8)
+	pb.Buf[idx+1] = byte(rgb565)
+}
+
+// Clear fills the entire canvas with a single base color
+func (pb *PixelBuffer) Clear(r, g, b byte) {
+	for y := 0; y < pb.Height; y++ {
+		for x := 0; x < pb.Width; x++ {
+			pb.SetPixel(x, y, r, g, b)
+		}
+	}
+}
+
+// DrawCircle creates a colored outline or solid disc
+func (pb *PixelBuffer) DrawCircle(cx, cy, radius int, r, g, b byte, fill bool) {
+	for y := cy - radius; y <= cy+radius; y++ {
+		for x := cx - radius; x <= cx+radius; x++ {
+			// Pathagorean theorem to find pixel distance from the center point
+			dx := float64(x - cx)
+			dy := float64(y - cy)
+			dist := math.Sqrt(dx*dx + dy*dy)
+
+			if fill {
+				if dist <= float64(radius) {
+					pb.SetPixel(x, y, r, g, b)
+				}
+			} else {
+				// Outline thickness of roughly 1 pixel boundary
+				if dist >= float64(radius-1) && dist <= float64(radius) {
+					pb.SetPixel(x, y, r, g, b)
+				}
+			}
+		}
+	}
+}
+
+// DrawRect renders filled blocks or layout backgrounds
+func (pb *PixelBuffer) DrawRect(x, y, w, h int, r, g, b byte) {
+	for row := y; row < y+h; row++ {
+		for col := x; col < x+w; col++ {
+			pb.SetPixel(col, row, r, g, b)
+		}
+	}
+}
+
+func (d *GC9A01) PushBuffer(pb *PixelBuffer) error {
+	// 1. Tell the display we want to draw the full 240x240 frame canvas
+	d.SetWindow(0, 0, uint16(pb.Width-1), uint16(pb.Height-1))
+
+	// 2. Define the maximum chunk size allowed by Linux sysfs (4096 bytes)
+	const maxChunkSize = 4096
+	data := pb.Buf
+	totalBytes := len(data)
+
+	// 3. Loop and transmit chunks sequentially
+	for i := 0; i < totalBytes; i += maxChunkSize {
+		end := i + maxChunkSize
+		if end > totalBytes {
+			end = totalBytes // Prevent slicing past the end of the array
+		}
+
+		// Send just this chunk
+		if err := d.WriteData(data[i:end]); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

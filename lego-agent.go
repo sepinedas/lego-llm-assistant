@@ -93,27 +93,36 @@ func main() {
 	defer bus.Close()
 
 	// Connect with max speed specs of GC9A01 (up to 40MHz, keeping 24MHz for safety)
-	spiConn, err := bus.Connect(24*physic.MegaHertz, spi.Mode0, 8)
+	spiConn, err := bus.Connect(24*physic.MegaHertz, spi.Mode3, 8)
 	if err != nil {
 		log.Fatalf("failed to configure SPI connection: %v", err)
 	}
 
 	// Setup GPIO Control Pins (Modify pin strings based on your wiring setup)
-	dc := gpioreg.ByName("GPIO22")
+	dc := gpioreg.ByName("GPIO25")
 	rst := gpioreg.ByName("GPIO27")
 
-	display := &GC9A01{
-		spiConn: spiConn,
-		dcPin:   dc,
-		rstPin:  rst,
+	display := &GC9A01{spiConn: spiConn, dcPin: dc, rstPin: rst}
+	display.InitLCD()
+
+	// Create canvas space
+	canvas := NewPixelBuffer(240, 240)
+
+	// Fill background dark grey
+	canvas.Clear(200, 200, 200)
+
+	// Draw a bright red circular ring at center (offset boundary frame check)
+	// canvas.DrawCircle(120, 120, 110, 255, 0, 0, true)
+
+	// Draw a solid green square target inside
+	// canvas.DrawRect(95, 95, 50, 50, 0, 255, 0)
+
+	// Output buffer arrays to physical hardware pins
+	if err := display.PushBuffer(canvas); err != nil {
+		log.Fatalf("failed to push image frame: %v", err)
 	}
 
-	// Execute sequence to fire up the round screen
-	if err := display.InitLCD(); err != nil {
-		log.Fatalf("failed to initialize GC9A01 screen: %v", err)
-	}
-
-	log.Println("GC9A01 Successfully initialized!")
+	log.Println("Frame updated successfully!")
 
 	go func() {
 		for {
