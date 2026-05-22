@@ -17,7 +17,7 @@ import (
 	"periph.io/x/host/v3"
 )
 
-const commandTimeout = 5 * time.Second
+const commandTimeout = 3 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -29,7 +29,9 @@ func main() {
 		log.Panic(err)
 	}
 
-	rec := VoskRecognizer(InputSampleRate)
+	recMaya := VoskRecognizer(InputSampleRate, `["maya"]`)
+	recBye := VoskRecognizer(InputSampleRate, `["adios", "alto"]`)
+
 	isMicOpen := false
 	isCommandOpen := false
 
@@ -42,7 +44,7 @@ func main() {
 	startSession := make(chan bool)
 
 	enableSpeech := func(active bool) {
-		if isMicOpen && active {
+		if isMicOpen && active && rb.IsEmpty() {
 			isCommandOpen = true
 			timer.Reset(commandTimeout)
 			fmt.Println("Command enabled.")
@@ -61,7 +63,7 @@ func main() {
 		if rb.IsEmpty() && isMicOpen {
 			inAudio <- data
 		}
-		Recognize(rec, data, func(text string) {
+		Recognize(recMaya, data, func(text string) {
 			if text == "maya" {
 				enableSpeech(true)
 
@@ -70,7 +72,9 @@ func main() {
 				default:
 				}
 			}
-			if (text == "alto" || text == "adios") && isCommandOpen {
+		})
+		Recognize(recBye, data, func(text string) {
+			if (text == "alto" || text == "adios") && isCommandOpen && rb.IsEmpty() {
 				go func() {
 					endSession <- true
 					enableSpeech(false)

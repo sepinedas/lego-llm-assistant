@@ -4,4 +4,5 @@ go build .
 mv lego-llm-assistant ~/
 
 systemctl --user daemon-reload
-systemctl --user restart lego-maya.service
+systemctl --user stop lego-maya.service
+systemctl --user start lego-maya.service

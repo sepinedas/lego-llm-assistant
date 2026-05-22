@@ -13,15 +13,14 @@ type VoskResponse struct {
 	Text string `json:"text"`
 }
 
-func VoskRecognizer(sampleRate float64) *vosk.VoskRecognizer {
+func VoskRecognizer(sampleRate float64, grammar string) *vosk.VoskRecognizer {
 	modelPath := os.Getenv("VOSK_MODEL")
 	model, err := vosk.NewModel(modelPath)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	grammarJSON := `["maya", "alto", "adios"]`
-	rec, err := vosk.NewRecognizerGrm(model, sampleRate, []byte(grammarJSON))
+	rec, err := vosk.NewRecognizerGrm(model, sampleRate, []byte(grammar))
 	if err != nil {
 		log.Panic(err)
 	}
