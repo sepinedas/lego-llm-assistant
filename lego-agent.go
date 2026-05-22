@@ -10,6 +10,10 @@ import (
 	"time"
 
 	"github.com/smallnest/ringbuffer"
+	"periph.io/x/conn/v3/gpio/gpioreg"
+	"periph.io/x/conn/v3/physic"
+	"periph.io/x/conn/v3/spi"
+	"periph.io/x/conn/v3/spi/spireg"
 	"periph.io/x/host/v3"
 )
 
@@ -80,6 +84,36 @@ func main() {
 
 	defer showSpeechEnabled(false)
 	defer showCommandEnabled(false)
+
+	// Open the SPI bus (e.g., SPI0.0 on Raspberry Pi)
+	bus, err := spireg.Open("SPI0.0")
+	if err != nil {
+		log.Fatalf("failed to open SPI: %v", err)
+	}
+	defer bus.Close()
+
+	// Connect with max speed specs of GC9A01 (up to 40MHz, keeping 24MHz for safety)
+	spiConn, err := bus.Connect(24*physic.MegaHertz, spi.Mode0, 8)
+	if err != nil {
+		log.Fatalf("failed to configure SPI connection: %v", err)
+	}
+
+	// Setup GPIO Control Pins (Modify pin strings based on your wiring setup)
+	dc := gpioreg.ByName("GPIO22")
+	rst := gpioreg.ByName("GPIO27")
+
+	display := &GC9A01{
+		spiConn: spiConn,
+		dcPin:   dc,
+		rstPin:  rst,
+	}
+
+	// Execute sequence to fire up the round screen
+	if err := display.InitLCD(); err != nil {
+		log.Fatalf("failed to initialize GC9A01 screen: %v", err)
+	}
+
+	log.Println("GC9A01 Successfully initialized!")
 
 	go func() {
 		for {
