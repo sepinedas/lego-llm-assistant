@@ -19,6 +19,44 @@ import (
 
 const commandTimeout = 3 * time.Second
 
+func initDisplay() {
+	// Open the SPI bus (e.g., SPI0.0 on Raspberry Pi)
+	bus, err := spireg.Open("SPI0.0")
+	if err != nil {
+		log.Fatalf("failed to open SPI: %v", err)
+	}
+	defer bus.Close()
+
+	// Connect with max speed specs of GC9A01 (up to 40MHz, keeping 24MHz for safety)
+	conn, err := bus.Connect(40*physic.MegaHertz, spi.Mode3, 8)
+	if err != nil {
+		log.Fatalf("failed to configure SPI connection: %v", err)
+	}
+
+	// Setup GPIO Control Pins (Modify pin strings based on your wiring setup)
+	dc := gpioreg.ByName("GPIO25")
+	rst := gpioreg.ByName("GPIO27")
+
+	dev, err := newGC9A01(conn, dc, rst)
+	if err != nil {
+		log.Fatalf("GC9A01 init: %v", err)
+	}
+
+	log.Println("Display ready — animating eyes. Ctrl-C to quit.")
+
+	anim := newAnimator()
+	ticker := time.NewTicker(time.Second / 30)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		anim.Step()
+		frame := renderFrame(anim.left, anim.right)
+		if err := dev.DrawFrame(frame); err != nil {
+			log.Printf("draw error: %v", err)
+		}
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -89,44 +127,7 @@ func main() {
 	defer showSpeechEnabled(false)
 	defer showCommandEnabled(false)
 
-	// Open the SPI bus (e.g., SPI0.0 on Raspberry Pi)
-	bus, err := spireg.Open("SPI0.0")
-	if err != nil {
-		log.Fatalf("failed to open SPI: %v", err)
-	}
-	defer bus.Close()
-
-	// Connect with max speed specs of GC9A01 (up to 40MHz, keeping 24MHz for safety)
-	spiConn, err := bus.Connect(24*physic.MegaHertz, spi.Mode3, 8)
-	if err != nil {
-		log.Fatalf("failed to configure SPI connection: %v", err)
-	}
-
-	// Setup GPIO Control Pins (Modify pin strings based on your wiring setup)
-	dc := gpioreg.ByName("GPIO25")
-	rst := gpioreg.ByName("GPIO27")
-
-	display := &GC9A01{spiConn: spiConn, dcPin: dc, rstPin: rst}
-	display.InitLCD()
-
-	// Create canvas space
-	canvas := NewPixelBuffer(240, 240)
-
-	// Fill background dark grey
-	canvas.Clear(200, 200, 200)
-
-	// Draw a bright red circular ring at center (offset boundary frame check)
-	// canvas.DrawCircle(120, 120, 110, 255, 0, 0, true)
-
-	// Draw a solid green square target inside
-	// canvas.DrawRect(95, 95, 50, 50, 0, 255, 0)
-
-	// Output buffer arrays to physical hardware pins
-	if err := display.PushBuffer(canvas); err != nil {
-		log.Fatalf("failed to push image frame: %v", err)
-	}
-
-	log.Println("Frame updated successfully!")
+	go initDisplay()
 
 	go func() {
 		for {
