@@ -4,55 +4,81 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/smallnest/ringbuffer"
-	"periph.io/x/conn/v3/gpio/gpioreg"
-	"periph.io/x/conn/v3/physic"
-	"periph.io/x/conn/v3/spi"
-	"periph.io/x/conn/v3/spi/spireg"
+	"periph.io/x/conn/v3/driver/driverreg"
 	"periph.io/x/host/v3"
 )
 
 const commandTimeout = 3 * time.Second
 
 func initDisplay() {
-	// Open the SPI bus (e.g., SPI0.0 on Raspberry Pi)
-	bus, err := spireg.Open("SPI0.0")
-	if err != nil {
-		log.Fatalf("failed to open SPI: %v", err)
+	if _, err := host.Init(); err != nil {
+		log.Fatal(err)
 	}
-	defer bus.Close()
-
-	// Connect with max speed specs of GC9A01 (up to 40MHz, keeping 24MHz for safety)
-	conn, err := bus.Connect(40*physic.MegaHertz, spi.Mode3, 8)
-	if err != nil {
-		log.Fatalf("failed to configure SPI connection: %v", err)
+	if _, err := driverreg.Init(); err != nil {
+		log.Fatal(err)
 	}
 
-	// Setup GPIO Control Pins (Modify pin strings based on your wiring setup)
-	dc := gpioreg.ByName("GPIO25")
-	rst := gpioreg.ByName("GPIO27")
-
-	dev, err := newGC9A01(conn, dc, rst)
+	mouth, err := openDisplay("SPI0.0", "GPIO25", "GPIO27")
 	if err != nil {
-		log.Fatalf("GC9A01 init: %v", err)
+		log.Fatal("mouth:", err)
 	}
+	defer mouth.Close()
 
-	log.Println("Display ready — animating eyes. Ctrl-C to quit.")
+	eye, err := openDisplay("SPI0.1", "GPIO22", "GPIO23")
+	if err != nil {
+		log.Fatal("eye:", err)
+	}
+	defer eye.Close()
 
-	anim := newAnimator()
-	ticker := time.NewTicker(time.Second / 30)
-	defer ticker.Stop()
+	log.Println("Photo-realistic displays running at 30 fps")
 
-	for range ticker.C {
-		anim.Step()
-		frame := renderFrame(anim.left, anim.right)
-		if err := dev.DrawFrame(frame); err != nil {
-			log.Printf("draw error: %v", err)
+	lidSpr := newSpring(1.0, 265, 20)
+	smileSpr := newSpring(0.72, 3.5, 3.2)
+
+	const fps = 30
+	frameDur := time.Second / fps
+	dt := 1.0 / float64(fps)
+	phIdx, phStart, animStart := 0, time.Now(), time.Now()
+
+	for {
+		t0 := time.Now()
+		animT := t0.Sub(animStart).Seconds()
+		if time.Since(phStart) >= sequence[phIdx].dur {
+			phIdx = (phIdx + 1) % len(sequence)
+			phStart = time.Now()
+		}
+		ph := sequence[phIdx]
+
+		var il, is float64
+		if ph.lidTarget > 0.85 {
+			il = 0.04 * math.Sin(animT*0.91)
+			is = 0.04 * math.Sin(animT*0.77)
+		}
+		lidSpr.tick(ph.lidTarget+il, dt)
+		smileSpr.tick(ph.smileTarget+is, dt)
+
+		lid := clampF(lidSpr.pos, 0, 1)
+		smile := clampF(smileSpr.pos, 0, 1)
+
+		eyeImg := renderEye(lid, animT, ph.zzz)
+		mouthImg := renderMouth(smile, ph.asleep, animT)
+
+		if err := eye.dev.draw(eyeImg); err != nil {
+			log.Println("eye:", err)
+		}
+		if err := mouth.dev.draw(mouthImg); err != nil {
+			log.Println("mouth:", err)
+		}
+
+		if s := frameDur - time.Since(t0); s > 0 {
+			time.Sleep(s)
 		}
 	}
 }
@@ -62,10 +88,6 @@ func main() {
 	defer stop()
 
 	rb := ringbuffer.New(1024 * 4096)
-
-	if _, err := host.Init(); err != nil {
-		log.Panic(err)
-	}
 
 	recMaya := VoskRecognizer(InputSampleRate, `["maya"]`)
 	recBye := VoskRecognizer(InputSampleRate, `["adios", "alto"]`)
