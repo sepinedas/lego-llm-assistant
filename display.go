@@ -744,23 +744,6 @@ func initDisplay(stateCh chan AnimState) {
 	mouthAnim := NewMouthAnimator() // drives left display
 	eyeAnim := NewAnimator(0.0)     // drives right display
 
-	// ── State-cycle goroutine ─────────────────────────────────────────────
-	// Edit stateCycle to change the demo sequence or connect an external trigger.
-	stateCycle := []struct {
-		state AnimState
-		dur   time.Duration
-	}{
-		{Neutral, 5 * time.Second},
-		{Speaking, 5 * time.Second},
-		{Asleep, 6 * time.Second},
-	}
-	go func() {
-		for i := 0; ; i = (i + 1) % len(stateCycle) {
-			stateCh <- stateCycle[i].state
-			time.Sleep(stateCycle[i].dur)
-		}
-	}()
-
 	// ── Render / push loop (~30 fps) ──────────────────────────────────────
 	ticker := time.NewTicker(time.Second / time.Duration(targetFPS))
 	defer ticker.Stop()
