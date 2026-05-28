@@ -4,84 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/smallnest/ringbuffer"
-	"periph.io/x/conn/v3/driver/driverreg"
-	"periph.io/x/host/v3"
 )
 
 const commandTimeout = 3 * time.Second
-
-func initDisplay() {
-	if _, err := host.Init(); err != nil {
-		log.Fatal(err)
-	}
-	if _, err := driverreg.Init(); err != nil {
-		log.Fatal(err)
-	}
-
-	mouth, err := openDisplay("SPI0.0", "GPIO25", "GPIO27")
-	if err != nil {
-		log.Fatal("mouth:", err)
-	}
-	defer mouth.Close()
-
-	eye, err := openDisplay("SPI0.1", "GPIO22", "GPIO23")
-	if err != nil {
-		log.Fatal("eye:", err)
-	}
-	defer eye.Close()
-
-	log.Println("Photo-realistic displays running at 30 fps")
-
-	lidSpr := newSpring(1.0, 265, 20)
-	smileSpr := newSpring(0.72, 3.5, 3.2)
-
-	const fps = 30
-	frameDur := time.Second / fps
-	dt := 1.0 / float64(fps)
-	phIdx, phStart, animStart := 0, time.Now(), time.Now()
-
-	for {
-		t0 := time.Now()
-		animT := t0.Sub(animStart).Seconds()
-		if time.Since(phStart) >= sequence[phIdx].dur {
-			phIdx = (phIdx + 1) % len(sequence)
-			phStart = time.Now()
-		}
-		ph := sequence[phIdx]
-
-		var il, is float64
-		if ph.lidTarget > 0.85 {
-			il = 0.04 * math.Sin(animT*0.91)
-			is = 0.04 * math.Sin(animT*0.77)
-		}
-		lidSpr.tick(ph.lidTarget+il, dt)
-		smileSpr.tick(ph.smileTarget+is, dt)
-
-		lid := clampF(lidSpr.pos, 0, 1)
-		smile := clampF(smileSpr.pos, 0, 1)
-
-		eyeImg := renderEye(lid, animT, ph.zzz)
-		mouthImg := renderMouth(smile, ph.asleep, animT)
-
-		if err := eye.dev.draw(eyeImg); err != nil {
-			log.Println("eye:", err)
-		}
-		if err := mouth.dev.draw(mouthImg); err != nil {
-			log.Println("mouth:", err)
-		}
-
-		if s := frameDur - time.Since(t0); s > 0 {
-			time.Sleep(s)
-		}
-	}
-}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -94,6 +25,9 @@ func main() {
 
 	isMicOpen := false
 	isCommandOpen := false
+	fatialState := make(chan AnimState)
+
+	go initDisplay(fatialState)
 
 	timer := time.NewTimer(0)
 
@@ -117,6 +51,7 @@ func main() {
 			fmt.Println("Speech disabled.")
 		}
 		isMicOpen = active
+		fatialState <- Neutral
 	}
 
 	handleInputAudio := func(data []byte, framecount uint32) {
@@ -149,7 +84,20 @@ func main() {
 	defer showSpeechEnabled(false)
 	defer showCommandEnabled(false)
 
-	go initDisplay()
+	go func() {
+		fatialState <- Asleep
+	}()
+
+	go func() {
+		for {
+			for !rb.IsEmpty() {
+				fatialState <- Speaking
+			}
+			if isMicOpen {
+				fatialState <- Neutral
+			}
+		}
+	}()
 
 	go func() {
 		for {
@@ -162,6 +110,7 @@ func main() {
 				fmt.Println("Opening new session.")
 				<-endSession
 				fmt.Println("Closing session.")
+				fatialState <- Asleep
 			case <-ctx.Done():
 				return
 			}
