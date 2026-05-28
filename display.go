@@ -48,18 +48,23 @@ import (
 const (
 	screenW   = 240                   // GC9A01 width  (pixels)
 	screenH   = 240                   // GC9A01 height (pixels)
-	brickPx   = 20                    // pixels per LEGO brick → 12 × 12 grid
-	gridN     = screenW / brickPx     // = 12
+	brickPx   = 10                    // pixels per LEGO brick → 24 × 24 grid
+	gridN     = screenW / brickPx     // = 24
 	frameSize = screenW * screenH * 2 // RGB565 bytes per full frame
 
 	targetFPS = 30
 	frameDT   = 1.0 / float64(targetFPS)
 
-	// Eye geometry (brick-unit radii, centre at gridN/2 = 6.0)
-	outerR   = 5.5 // edge of rendered circle (corners → background)
-	rimR     = 4.5 // outer sclera edge (narrow dark ring inside outerR)
-	irisRst  = 2.3 // iris radius at rest
-	pupilRst = 1.3 // pupil radius at rest
+	// Eye geometry (brick-unit values; gridN=24, scaled ×2 vs 12-grid)
+	outerR   = 11.0 // edge of rendered circle (corners → background)
+	rimR     = 9.0  // outer sclera edge (narrow dark ring inside outerR)
+	irisRst  = 4.6  // iris radius at rest
+	pupilRst = 2.6  // pupil radius at rest
+
+	// Mouth geometry (brick units, ×2 scale vs 12-grid)
+	mouthOvalW = 10.4 // oval half-width
+	mouthOvalH = 8.0  // oval half-height
+	mouthLipT  = 3.5  // lip thickness — thin
 )
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
@@ -105,6 +110,13 @@ var (
 	colIrisFx  = col{55, 160, 255}  // speaking iris glow (brighter blue)
 	colPupil   = col{8, 8, 14}      // near-black pupil
 	colHilite  = col{255, 255, 255} // corneal highlight
+
+	// Mouth palette
+	colLip          = col{200, 78, 88}   // LEGO red-pink lip
+	colTeeth        = col{245, 245, 250} // white teeth
+	colMouth        = col{20, 7, 9}      // dark inner mouth cavity
+	colTongue       = col{218, 112, 118} // pink tongue
+	colTongueGroove = col{185, 88, 93}   // darker median sulcus groove
 )
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
@@ -287,9 +299,9 @@ func brickBase(bx, by int, p EyeParams) col {
 
 	if pd < p.PupilR {
 		// Corneal highlight: one ~brick-sized spot, upper-left of pupil
-		hdx := bfx - (pcx - 0.65)
-		hdy := bfy - (pcy - 0.65)
-		if math.Sqrt(hdx*hdx+hdy*hdy) < 0.55 {
+		hdx := bfx - (pcx - 1.3)
+		hdy := bfy - (pcy - 1.3)
+		if math.Sqrt(hdx*hdx+hdy*hdy) < 1.1 {
 			return colHilite
 		}
 		return colPupil
@@ -309,22 +321,22 @@ func brickBase(bx, by int, p EyeParams) col {
 func brickPixel(base col, lx, ly int) col {
 	// ── Bevel ─────────────────────────────────────────────────────────────
 	if lx == brickPx-1 || ly == brickPx-1 {
-		return base.dim(55) // shadow: right & bottom edges
+		return base.dim(32) // shadow: right & bottom edges
 	}
 	if lx == 0 || ly == 0 {
-		return base.glow(28) // highlight: top & left edges
+		return base.glow(40) // highlight: top & left edges
 	}
 
 	// ── Circular stud centred in each brick ───────────────────────────────
-	//   Outer ring (illuminated side wall) and flat top (slightly darker).
+	//   Proportioned for 5 px bricks: outer ring r≈1.55, inner top r≈1.1.
 	scx := float64(brickPx)/2.0 - 0.5
 	scy := float64(brickPx)/2.0 - 0.5
 	sdx := float64(lx) - scx
 	sdy := float64(ly) - scy
 	sd := math.Sqrt(sdx*sdx + sdy*sdy)
-	if sd < 5.8 {
-		if sd < 3.5 {
-			return base.dim(12) // stud top-face (subtle inset)
+	if sd < 2.9 {
+		if sd < 1.9 {
+			return base.dim(11) // stud top-face (subtle inset)
 		}
 		return base.glow(42) // stud side-wall (lit by the LEGO sun)
 	}
@@ -348,8 +360,94 @@ func RenderEye(p EyeParams, buf []byte) {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  Animation state machine                                                  ║
+// ║  LEGO-brick mouth renderer                                                ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
+
+// MouthParams holds all animatable mouth state.
+type MouthParams struct {
+	OpenT  float64 // 0 = closed,  1 = wide open (lower jaw drops)
+	SmileT float64 // -1 = frown,  0 = neutral,  +1 = full smile
+}
+
+func restingMouthParams() MouthParams {
+	return MouthParams{SmileT: 0.5}
+}
+
+// mouthBrickBase returns the palette colour for mouth brick (bx, by).
+func mouthBrickBase(bx, by int, mp MouthParams) col {
+	bfx := float64(bx) + 0.5
+	bfy := float64(by) + 0.5
+	dx := bfx - eyeCX
+	dy := bfy - eyeCY
+
+	// ── Oval outer boundary ──────────────────────────────────────────────
+	odx := dx / mouthOvalW
+	ody := dy / mouthOvalH
+	if odx*odx+ody*ody > 1.0 {
+		return colBg
+	}
+
+	// ── Smile parabola: positive SmileT lifts corners upward ─────────────
+	xNorm := dx / mouthOvalW                 // -1 … +1 across the oval
+	smile := mp.SmileT * 2.8 * xNorm * xNorm // coeff scaled ×2 vs 12-grid
+
+	upperTop := eyeCY - 3.2 - smile     // top of upper lip
+	upperBot := upperTop + mouthLipT    // bottom of upper lip / top of gap
+	lowerTop := upperBot + mp.OpenT*4.8 // top of lower lip (jaw drops by OpenT)
+	lowerBot := lowerTop + mouthLipT    // bottom of lower lip
+
+	switch {
+	case bfy < upperTop:
+		return colBg // above mouth
+	case bfy < upperBot:
+		return colLip // upper lip
+	case bfy < lowerTop:
+		// Inside the mouth gap
+		if mp.OpenT < 0.04 {
+			return colLip // barely open — lips appear closed
+		}
+		relY := (bfy - upperBot) / (lowerTop - upperBot) // 0=top, 1=bottom of gap
+
+		// Upper teeth (top 35% of gap)
+		if relY < 0.35 {
+			return colTeeth
+		}
+
+		// Tongue: visible as soon as the mouth is open
+		if relY > 0.50 && mp.OpenT > 0.10 {
+			// Tongue narrows the closer to the tip; widens toward the base.
+			tongueEdge := mouthOvalW * 0.72 * (0.75 + (relY-0.50)/0.50*0.25)
+			if math.Abs(dx) > tongueEdge {
+				return colMouth // sides of mouth cavity, past tongue edge
+			}
+			// Median sulcus: a darker groove running down the centre
+			if math.Abs(dx) < 0.7 {
+				return colTongueGroove
+			}
+			return colTongue
+		}
+
+		return colMouth // dark gap between teeth and tongue
+	case bfy < lowerBot:
+		return colLip // lower lip
+	default:
+		return colBg // below mouth
+	}
+}
+
+// RenderMouth writes a full 240×240 RGB565 frame of the mouth into buf.
+func RenderMouth(mp MouthParams, buf []byte) {
+	for y := 0; y < screenH; y++ {
+		for x := 0; x < screenW; x++ {
+			base := mouthBrickBase(x/brickPx, y/brickPx, mp)
+			c := brickPixel(base, x%brickPx, y%brickPx)
+			hi, lo := c.rgb565()
+			i := (y*screenW + x) * 2
+			buf[i] = hi
+			buf[i+1] = lo
+		}
+	}
+}
 
 // AnimState represents one of the three eye moods.
 type AnimState int
@@ -421,8 +519,8 @@ func (a *Animator) Tick(dt float64) EyeParams {
 		a.p.IrisBright *= math.Pow(0.02, dt) // → 0 in ~0.8 s
 
 		// Slow, lissajous-style gaze drift (looks natural, never repeats)
-		a.p.PupilDX = math.Sin(a.elapsed*0.41) * 0.22
-		a.p.PupilDY = math.Cos(a.elapsed*0.31) * 0.17
+		a.p.PupilDX = math.Sin(a.elapsed*0.41) * 0.44
+		a.p.PupilDY = math.Cos(a.elapsed*0.31) * 0.34
 
 		// Blink logic
 		a.blinkCD -= dt
@@ -464,8 +562,8 @@ func (a *Animator) Tick(dt float64) EyeParams {
 		// Primary beat + a faster secondary for irregular feel
 		beat := math.Sin(a.beatPhase)*0.7 + math.Sin(a.beatPhase*2.1)*0.3
 
-		targetIrisR := 2.5 + beat*0.13
-		targetPupilR := 1.35 + math.Abs(beat)*0.09
+		targetIrisR := 5.0 + beat*0.26
+		targetPupilR := 2.7 + math.Abs(beat)*0.18
 		targetBright := 0.22 + math.Abs(beat)*0.38
 
 		speed := dt * 8.0
@@ -474,8 +572,8 @@ func (a *Animator) Tick(dt float64) EyeParams {
 		a.p.IrisBright += (targetBright - a.p.IrisBright) * speed
 
 		// Gaze darts with speech stress; Y follows beat, X drifts independently
-		a.p.PupilDX = math.Sin(a.elapsed*3.1) * 0.28
-		a.p.PupilDY = beat * 0.18
+		a.p.PupilDX = math.Sin(a.elapsed*3.1) * 0.56
+		a.p.PupilDY = beat * 0.36
 
 		// Open the bottom lid fully (in case we came from Asleep)
 		// then apply stress-squint only to the top lid
@@ -490,13 +588,13 @@ func (a *Animator) Tick(dt float64) EyeParams {
 	case Asleep:
 		a.p.EyelidT += (0.54 - a.p.EyelidT) * dt * 2.2
 		a.p.BottomLidT += (0.46 - a.p.BottomLidT) * dt * 1.8
-		a.p.IrisR += (1.3 - a.p.IrisR) * dt * 2.5
-		a.p.PupilR += (0.45 - a.p.PupilR) * dt * 2.5
+		a.p.IrisR += (2.6 - a.p.IrisR) * dt * 2.5
+		a.p.PupilR += (0.9 - a.p.PupilR) * dt * 2.5
 		a.p.IrisBright *= math.Pow(0.01, dt) // dim to 0
 
 		// Subtle dream-twitches (only perceptible while lids are still parting)
-		a.p.PupilDX = math.Sin(a.elapsed*0.8) * 0.07
-		a.p.PupilDY = math.Cos(a.elapsed*0.6) * 0.06
+		a.p.PupilDX = math.Sin(a.elapsed*0.8) * 0.14
+		a.p.PupilDY = math.Cos(a.elapsed*0.6) * 0.12
 	}
 
 	return a.p
@@ -505,6 +603,73 @@ func (a *Animator) Tick(dt float64) EyeParams {
 // blinkCooldown resets the blink countdown with a random interval.
 func (a *Animator) blinkCooldown() {
 	a.blinkCD = 2.8 + rand.Float64()*2.2
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  Mouth animation state machine                                            ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// MouthAnimator drives the mouth display independently from the eye animator.
+// It reacts to the same AnimState but animates OpenT and SmileT instead.
+type MouthAnimator struct {
+	state     AnimState
+	elapsed   float64
+	beatPhase float64
+	mp        MouthParams
+}
+
+func NewMouthAnimator() *MouthAnimator {
+	return &MouthAnimator{
+		state: Neutral,
+		mp:    restingMouthParams(),
+	}
+}
+
+func (m *MouthAnimator) SetState(s AnimState) {
+	if s == m.state {
+		return
+	}
+	m.state = s
+	m.elapsed = 0
+	m.beatPhase = 0
+}
+
+// Tick advances the mouth animation by dt seconds and returns current MouthParams.
+func (m *MouthAnimator) Tick(dt float64) MouthParams {
+	m.elapsed += dt
+
+	smooth := func(cur, tgt, speed float64) float64 {
+		return cur + (tgt-cur)*math.Min(1.0, dt*speed)
+	}
+
+	switch m.state {
+
+	// ── Neutral ───────────────────────────────────────────────────────────
+	//  · Lips closed, gentle resting smile.
+	case Neutral:
+		m.mp.OpenT = smooth(m.mp.OpenT, 0.0, 4.0)
+		m.mp.SmileT = smooth(m.mp.SmileT, 0.50, 4.0)
+
+	// ── Speaking ──────────────────────────────────────────────────────────
+	//  · Lower jaw bobs with the speech-beat rhythm.
+	//  · Smile flexes slightly on stressed syllables.
+	//  · Tongue becomes visible on wide-open frames.
+	case Speaking:
+		m.beatPhase += dt * 5.5
+		beat := math.Sin(m.beatPhase)*0.7 + math.Sin(m.beatPhase*2.1)*0.3
+		m.mp.OpenT = smooth(m.mp.OpenT, 0.25+math.Abs(beat)*0.55, 9.0)
+		m.mp.SmileT = smooth(m.mp.SmileT, 0.40+beat*0.10, 9.0)
+
+	// ── Asleep ────────────────────────────────────────────────────────────
+	//  · Jaw slackens very slightly (small snore oscillation).
+	//  · Corners of mouth relax into a subtle frown.
+	case Asleep:
+		snore := math.Sin(m.elapsed*1.8) * 0.03
+		m.mp.OpenT = smooth(m.mp.OpenT, 0.04+snore, 1.8)
+		m.mp.SmileT = smooth(m.mp.SmileT, -0.18, 1.8)
+	}
+
+	return m.mp
 }
 
 func initDisplay(stateCh chan AnimState) {
@@ -522,8 +687,8 @@ func initDisplay(stateCh chan AnimState) {
 		}
 		return p
 	}
-	portL := mustPort("SPI0.0") // left eye  (CS0 → GPIO8)
-	portR := mustPort("SPI0.1") // right eye (CS1 → GPIO7)
+	portL := mustPort("SPI0.0") // left  display (CS0 → GPIO8) — MOUTH
+	portR := mustPort("SPI0.1") // right display (CS1 → GPIO7) — EYE
 	defer portL.Close()
 	defer portR.Close()
 
@@ -547,8 +712,8 @@ func initDisplay(stateCh chan AnimState) {
 		}
 		return p
 	}
-	dcL := mustPin("GPIO25") // D/C for left eye
-	dcR := mustPin("GPIO22") // D/C for right eye
+	dcL := mustPin("GPIO25") // D/C for left  display (mouth)
+	dcR := mustPin("GPIO22") // D/C for right display (eye)
 	rst := mustPin("GPIO27") // RST (shared – both displays)
 
 	// ── Hardware reset (simultaneous for both displays) ───────────────────
@@ -565,19 +730,36 @@ func initDisplay(stateCh chan AnimState) {
 	// ── Initialise each display ───────────────────────────────────────────
 	dispL := newDisplay(connL, dcL)
 	dispR := newDisplay(connR, dcR)
-	log.Println("legoeyes: init left display")
+	log.Println("legoeyes: init left display (mouth)")
 	dispL.Init()
-	log.Println("legoeyes: init right display")
+	log.Println("legoeyes: init right display (eye)")
 	dispR.Init()
 	log.Println("legoeyes: displays ready")
 
 	// ── Pre-allocate frame buffers (reused every frame) ───────────────────
-	bufL := make([]byte, frameSize)
-	bufR := make([]byte, frameSize)
+	bufL := make([]byte, frameSize) // mouth frame
+	bufR := make([]byte, frameSize) // eye frame
 
-	// ── Animators — stagger blink clocks by 0.5 s so the eyes look natural ─
-	animL := NewAnimator(0.0)
-	animR := NewAnimator(0.5)
+	// ── Animators ─────────────────────────────────────────────────────────
+	mouthAnim := NewMouthAnimator() // drives left display
+	eyeAnim := NewAnimator(0.0)     // drives right display
+
+	// ── State-cycle goroutine ─────────────────────────────────────────────
+	// Edit stateCycle to change the demo sequence or connect an external trigger.
+	stateCycle := []struct {
+		state AnimState
+		dur   time.Duration
+	}{
+		{Neutral, 5 * time.Second},
+		{Speaking, 5 * time.Second},
+		{Asleep, 6 * time.Second},
+	}
+	go func() {
+		for i := 0; ; i = (i + 1) % len(stateCycle) {
+			stateCh <- stateCycle[i].state
+			time.Sleep(stateCycle[i].dur)
+		}
+	}()
 
 	// ── Render / push loop (~30 fps) ──────────────────────────────────────
 	ticker := time.NewTicker(time.Second / time.Duration(targetFPS))
@@ -598,20 +780,17 @@ func initDisplay(stateCh chan AnimState) {
 			if s != curState {
 				curState = s
 				log.Printf("legoeyes: → %s", curState)
-				animL.SetState(s)
-				animR.SetState(s)
+				mouthAnim.SetState(s)
+				eyeAnim.SetState(s)
 			}
 
 		case <-ticker.C:
-			// Tick both animators
-			pL := animL.Tick(frameDT)
-			pR := animR.Tick(frameDT)
+			mp := mouthAnim.Tick(frameDT)
+			ep := eyeAnim.Tick(frameDT)
 
-			// Build RGB565 frames
-			RenderEye(pL, bufL)
-			RenderEye(pR, bufR)
+			RenderMouth(mp, bufL)
+			RenderEye(ep, bufR)
 
-			// Push to hardware (left then right)
 			dispL.Flush(bufL)
 			dispR.Flush(bufR)
 		}
