@@ -9,8 +9,16 @@ import (
 	vosk "github.com/hekt/vosk-api/go"
 )
 
-type VoskResponse struct {
-	Text string `json:"text"`
+type VoskWord struct {
+	Conf  float64 `json:"conf"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+	Word  string  `json:"word"`
+}
+
+type VoskResult struct {
+	Result []VoskWord `json:"result"`
+	Text   string     `json:"text"`
 }
 
 func VoskRecognizer(sampleRate float64, grammar string) *vosk.VoskRecognizer {
@@ -34,12 +42,17 @@ func Recognize(rec *vosk.VoskRecognizer, data []byte, cb func(string)) {
 		res := rec.FinalResult()
 
 		// 2. Parse the JSON
-		var response VoskResponse
+		var response VoskResult
 		if err := json.Unmarshal(res, &response); err != nil {
 			fmt.Println("Error parsing JSON:", err)
 			return
 		}
-
+		if len(response.Result) != 1 {
+			return
+		}
+		if response.Result[0].Conf < 1 {
+			return
+		}
 		cb(response.Text)
 	}
 }
