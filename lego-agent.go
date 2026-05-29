@@ -44,7 +44,6 @@ func main() {
 			fmt.Println("Command enabled.")
 			showCommandEnabled(true)
 		}
-		showSpeechEnabled(active)
 		if active {
 			fmt.Println("Speech enabled.")
 		} else {
@@ -81,7 +80,6 @@ func main() {
 	}
 	Capture(handleInputAudio, InputSampleRate)
 
-	defer showSpeechEnabled(false)
 	defer showCommandEnabled(false)
 
 	go func() {
