@@ -38,19 +38,20 @@ func main() {
 	startSession := make(chan bool)
 
 	enableSpeech := func(active bool) {
-		if isMicOpen && active && rb.IsEmpty() {
+		if isMicOpen && active && !rb.IsEmpty() {
 			isCommandOpen = true
 			timer.Reset(commandTimeout)
 			fmt.Println("Command enabled.")
 			showCommandEnabled(true)
 		}
+		isMicOpen = active
 		if active {
 			fmt.Println("Speech enabled.")
+			fatialState <- Neutral
 		} else {
 			fmt.Println("Speech disabled.")
+			fatialState <- Asleep
 		}
-		isMicOpen = active
-		fatialState <- Neutral
 	}
 
 	handleInputAudio := func(data []byte, framecount uint32) {
@@ -59,18 +60,16 @@ func main() {
 		}
 		Recognize(recMaya, data, func(text string) {
 			if text == "maya" {
-				enableSpeech(true)
-
 				select {
 				case startSession <- true:
 				default:
+					enableSpeech(true)
 				}
 			}
 		})
 		Recognize(recBye, data, func(text string) {
 			if (text == "alto" || text == "adios") && isCommandOpen && rb.IsEmpty() {
 				go func() {
-					endSession <- true
 					enableSpeech(false)
 					showCommandEnabled(false)
 					rb.Reset()
@@ -101,14 +100,19 @@ func main() {
 		for {
 			select {
 			case <-startSession:
-				err := Session(ctx, func(data []byte) { rb.Write(data) }, inAudio, endSession)
+				session, err := Session(ctx, func(data []byte) { rb.Write(data) }, func() { enableSpeech(false) }, inAudio, endSession)
+				enableSpeech(true)
 				if err != nil {
 					log.Panic(err)
 				}
 				fmt.Println("Opening new session.")
 				<-endSession
 				fmt.Println("Closing session.")
-				fatialState <- Asleep
+				enableSpeech(false)
+				err = session.Close()
+				if err != nil {
+					log.Panic(err)
+				}
 			case <-ctx.Done():
 				return
 			}
