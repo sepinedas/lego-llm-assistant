@@ -54,7 +54,7 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 		SpeechConfig: &genai.SpeechConfig{
 			VoiceConfig: &genai.VoiceConfig{
 				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-					VoiceName: "Aoede", // Options typically include: Aoede, Charon, Fenrir, Kore, Puck
+					VoiceName: "zephyr", // Options typically include: Aoede, Charon, Fenrir, Kore, Puck
 				},
 			},
 		},
@@ -63,9 +63,9 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 			Parts: []*genai.Part{
 				{Text: `Eres una asistente con un tono de voz simpatico y acento tico.
 					Tu nombre es Maya. Vives en Condominio Alexa, casa #58, San Pablo, Heredia, Costa Rica.
-					Estas hecha de piezas de lego, y tu creador es Eduardo Pineda.
+					Estas hecha de piezas de lego, y te gusta contar cuentos y chistes.
 					Cuando el usuario diga algo que signifique adiós, vete a dormir, cierra los ojos,
-					hasta luego, buenas noches, o cualquier frase similar de despedida o sueño,
+					hasta luego, buenas noches, detente, para o cualquier frase similar de despedida o sueño,
 					DEBES llamar inmediatamente a la herramienta endSession con confirmed=true.
 					No digas palabras de despedida antes de llamar a la herramienta; simplemente llámala.`},
 			},
