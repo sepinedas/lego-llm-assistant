@@ -35,9 +35,11 @@ import (
 
 	"periph.io/x/conn/v3/gpio"
 	"periph.io/x/conn/v3/gpio/gpioreg"
+	"periph.io/x/conn/v3/gpio/gpiotest"
 	"periph.io/x/conn/v3/physic"
 	"periph.io/x/conn/v3/spi"
 	"periph.io/x/conn/v3/spi/spireg"
+	"periph.io/x/conn/v3/spi/spitest"
 	"periph.io/x/host/v3"
 )
 
@@ -674,47 +676,77 @@ func (m *MouthAnimator) Tick(dt float64) MouthParams {
 
 func initDisplay(stateCh chan AnimState) {
 	log.Println("legoeyes: starting")
-
+	var portL spi.PortCloser
+	var portR spi.PortCloser
+	var dcL gpio.PinIO
+	var dcR gpio.PinIO
+	var rst gpio.PinIO
+	var err error
+	// Check if we are running locally on a PC
+	if os.Getenv("ENV") == "local" {
+		log.Println("Running on PC: Using empty mock SPI port")
+		// 1. Create a dummy port that logs writes and does nothing on read
+		portL = &spitest.Record{}
+		portR = &spitest.Record{} // 1. Create a simulated Pin.
+		dcL = &gpiotest.Pin{
+			N:   "GPIO25",
+			Num: 21,
+			Fn:  "I/O",
+		}
+		dcR = &gpiotest.Pin{
+			N:   "GPIO22",
+			Num: 21,
+			Fn:  "I/O",
+		}
+		rst = &gpiotest.Pin{
+			N:   "GPIO27",
+			Num: 21,
+			Fn:  "I/O",
+		}
+	} else {
+		// 2. Production: Use real hardware
+		if _, err := host.Init(); err != nil {
+			log.Fatal(err)
+		}
+		portL, err = spireg.Open("SPI0.0")
+		if err != nil {
+			log.Fatalf("failed to open SPI port: %v", err)
+		}
+		portR, err = spireg.Open("SPI0.0")
+		if err != nil {
+			log.Fatalf("failed to open SPI port: %v", err)
+		}
+		dcL = gpioreg.ByName("GPIO25")
+		if dcL == nil {
+			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO25")
+		}
+		dcR = gpioreg.ByName("GPIO22")
+		if dcL == nil {
+			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO22")
+		}
+		rst = gpioreg.ByName("GPIO27")
+		if dcL == nil {
+			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO27")
+		}
+	}
 	if _, err := host.Init(); err != nil {
 		log.Fatal("periph host.Init:", err)
 	}
 
-	// ── Open both SPI ports (shared bus, separate chip-select lines) ──────
-	mustPort := func(name string) spi.PortCloser {
-		p, err := spireg.Open(name)
-		if err != nil {
-			log.Fatalf("spireg.Open(%q): %v", name, err)
-		}
-		return p
-	}
-	portL := mustPort("SPI0.0") // left  display (CS0 → GPIO8) — MOUTH
-	portR := mustPort("SPI0.1") // right display (CS1 → GPIO7) — EYE
 	defer portL.Close()
 	defer portR.Close()
 
 	// Connect at 40 MHz, SPI mode 0 (CPOL=0 CPHA=0), 8 bits per word.
 	// If you see display glitches try 32 MHz or 20 MHz.
-	mustConn := func(p spi.PortCloser, name string) spi.Conn {
+	mustConn := func(p spi.PortCloser) spi.Conn {
 		c, err := p.Connect(40*physic.MegaHertz, spi.Mode0, 8)
 		if err != nil {
-			log.Fatalf("spi connect %s: %v", name, err)
+			log.Fatalf("spi connect %s: %v", err)
 		}
 		return c
 	}
-	connL := mustConn(portL, "SPI0.0")
-	connR := mustConn(portR, "SPI0.1")
-
-	// ── GPIO pins ─────────────────────────────────────────────────────────
-	mustPin := func(name string) gpio.PinIO {
-		p := gpioreg.ByName(name)
-		if p == nil {
-			log.Fatalf("GPIO pin %q not found – check wiring / permissions", name)
-		}
-		return p
-	}
-	dcL := mustPin("GPIO25") // D/C for left  display (mouth)
-	dcR := mustPin("GPIO22") // D/C for right display (eye)
-	rst := mustPin("GPIO27") // RST (shared – both displays)
+	connL := mustConn(portL)
+	connR := mustConn(portR)
 
 	// ── Hardware reset (simultaneous for both displays) ───────────────────
 	log.Println("legoeyes: hardware reset")

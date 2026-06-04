@@ -21,7 +21,6 @@ func main() {
 	rb := ringbuffer.New(1024 * 4096)
 
 	recMaya := VoskRecognizer(InputSampleRate, `["maya"]`)
-	recBye := VoskRecognizer(InputSampleRate, `["adios", "alto"]`)
 
 	isMicOpen := false
 	isCommandOpen := false
@@ -38,7 +37,7 @@ func main() {
 	startSession := make(chan bool)
 
 	enableSpeech := func(active bool) {
-		if isMicOpen && active && !rb.IsEmpty() {
+		if isMicOpen && active {
 			isCommandOpen = true
 			timer.Reset(commandTimeout)
 			fmt.Println("Command enabled.")
@@ -55,7 +54,7 @@ func main() {
 	}
 
 	handleInputAudio := func(data []byte, framecount uint32) {
-		if rb.IsEmpty() && isMicOpen {
+		if (rb.IsEmpty() && isMicOpen) || isCommandOpen {
 			inAudio <- data
 		}
 		Recognize(recMaya, data, func(text string) {
@@ -65,15 +64,6 @@ func main() {
 				default:
 					enableSpeech(true)
 				}
-			}
-		})
-		Recognize(recBye, data, func(text string) {
-			if (text == "alto" || text == "adios") && isCommandOpen && rb.IsEmpty() {
-				go func() {
-					enableSpeech(false)
-					showCommandEnabled(false)
-					rb.Reset()
-				}()
 			}
 		})
 	}
@@ -100,7 +90,10 @@ func main() {
 		for {
 			select {
 			case <-startSession:
-				session, err := Session(ctx, func(data []byte) { rb.Write(data) }, func() { enableSpeech(false) }, inAudio, endSession)
+				session, err := Session(ctx, func(data []byte) { rb.Write(data) }, func() {
+					enableSpeech(false)
+					rb.Reset()
+				}, inAudio, endSession)
 				enableSpeech(true)
 				if err != nil {
 					log.Panic(err)
