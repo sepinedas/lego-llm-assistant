@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sepinedas/lego-llm-assistant/music"
 	"github.com/smallnest/ringbuffer"
 )
 
@@ -70,6 +71,8 @@ func main() {
 	Capture(handleInputAudio, InputSampleRate)
 
 	defer showCommandEnabled(false)
+
+	go music.InitMusic(ctx)
 
 	go func() {
 		fatialState <- Asleep
