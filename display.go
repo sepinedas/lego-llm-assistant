@@ -708,7 +708,7 @@ func initDisplay(stateCh chan AnimState) {
 		if _, err := host.Init(); err != nil {
 			log.Fatal(err)
 		}
-		portL, err = spireg.Open("SPI0.0")
+		portL, err = spireg.Open("SPI0.1")
 		if err != nil {
 			log.Fatalf("failed to open SPI port: %v", err)
 		}
@@ -721,11 +721,11 @@ func initDisplay(stateCh chan AnimState) {
 			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO25")
 		}
 		dcR = gpioreg.ByName("GPIO22")
-		if dcL == nil {
+		if dcR == nil {
 			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO22")
 		}
 		rst = gpioreg.ByName("GPIO27")
-		if dcL == nil {
+		if rst == nil {
 			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO27")
 		}
 	}
