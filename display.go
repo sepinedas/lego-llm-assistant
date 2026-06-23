@@ -622,22 +622,32 @@ func initDisplay(lock *string) {
 	var dcMouth gpio.PinIO
 	var rst gpio.PinIO
 
+	if _, err := host.Init(); err != nil {
+		log.Fatalf("periph init: %v", err)
+	}
+
 	if os.Getenv("ENV") == "local" {
 		log.Println("Running on PC: Using empty mock SPI port")
 
-		dcEye = &gpiotest.Pin{}
-		dcMouth = &gpiotest.Pin{}
-		rst = &gpiotest.Pin{}
+		dcEye = &gpiotest.Pin{
+			N:   *dcEyeName,
+			Num: 22,
+			Fn:  "I/O",
+		}
+		dcMouth = &gpiotest.Pin{
+			N:   *dcMouthName,
+			Num: 25,
+			Fn:  "I/O",
+		}
+		rst = &gpiotest.Pin{
+			N:   *rstName,
+			Num: 27,
+			Fn:  "I/O",
+		}
 	} else {
-
 		dcEye = mustPinOut(*dcEyeName)
 		dcMouth = mustPinOut(*dcMouthName)
 		rst = mustPinOut(*rstName)
-
-	}
-
-	if _, err := host.Init(); err != nil {
-		log.Fatalf("periph init: %v", err)
 	}
 
 	eye := openDisplay(*eyePort, *hz, dcEye)
