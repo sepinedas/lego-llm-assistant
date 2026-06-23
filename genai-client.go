@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time" // 1. Imported time package
 
 	"google.golang.org/genai"
 )
@@ -41,11 +42,23 @@ var disableSpeechTool = &genai.Tool{
 	},
 }
 
+// 2. Defined the current time tool
+var getCurrentTimeTool = &genai.Tool{
+	FunctionDeclarations: []*genai.FunctionDeclaration{
+		{
+			Name:        "getCurrentTime",
+			Description: "Obtiene la fecha y hora actual en Costa Rica.",
+			Parameters: &genai.Schema{
+				Type: genai.TypeObject,
+			},
+		},
+	},
+}
+
 func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(), audio <-chan []byte, end chan<- bool) (*genai.Session, error) {
 	model := "gemini-3.1-flash-live-preview"
 	client, err := genai.NewClient(ctx, nil)
 	if err != nil {
-		// Log fatal error if client creation fails (e.g., invalid config, authentication issues).
 		return nil, err
 	}
 
@@ -54,26 +67,26 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 		SpeechConfig: &genai.SpeechConfig{
 			VoiceConfig: &genai.VoiceConfig{
 				PrebuiltVoiceConfig: &genai.PrebuiltVoiceConfig{
-					VoiceName: "zephyr", // Options typically include: Aoede, Charon, Fenrir, Kore, Puck
+					VoiceName: "zephyr",
 				},
 			},
 		},
-		// Optional: System instructions to guide the persona
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
 				{Text: `Eres una asistente con un tono de voz simpatico y acento tico.
 					Tu nombre es Maya. Vives en Condominio Alexa, casa #58, San Pablo, Heredia, Costa Rica.
-					Estas hecha de piezas de lego, y te gusta contar cuentos y chistes.
+					Estas hecha de piezas de lego, y te gusta contar cuentos y hablar de temas educativos.
 					Cuando el usuario diga algo que signifique adiós, vete a dormir, cierra los ojos,
 					hasta luego, buenas noches, detente, para o cualquier frase similar de despedida o sueño,
 					DEBES llamar inmediatamente a la herramienta endSession con confirmed=true.
-					No digas palabras de despedida antes de llamar a la herramienta; simplemente llámala.`},
+					No digas palabras de despedida antes de llamar a la herramienta; simplemente llámala.
+					Si te preguntan la hora o fecha actual, utiliza la herramienta getCurrentTime.`},
 			},
 		},
-		Tools: []*genai.Tool{disableSpeechTool},
+		// 3. Added getCurrentTimeTool to the session configuration
+		Tools: []*genai.Tool{disableSpeechTool, getCurrentTimeTool},
 	})
 	if err != nil {
-		// Log fatal error if connecting to the model fails (e.g., network issues, invalid model name).
 		return nil, err
 	}
 
@@ -107,7 +120,6 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 			default:
 				response, err := session.Receive()
 				if err != nil {
-					// Log fatal error if receiving from the GenAI service fails (e.g., connection closed, network error).
 					log.Panic("Error receiving server response: %v", err)
 					return
 				}
@@ -135,6 +147,33 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 								},
 							})
 							onToolCall()
+						}
+
+						// 4. Handle the "getCurrentTime" tool call
+						if fc.Name == "getCurrentTime" {
+							// Load Costa Rica timezone to match Maya's persona
+							loc, err := time.LoadLocation("America/Costa_Rica")
+							var now time.Time
+							if err != nil {
+								now = time.Now() // Fallback to local time if timezone missing
+							} else {
+								now = time.Now().In(loc)
+							}
+
+							timeStr := now.Format("2006-01-02 15:04:05 Mon")
+							fmt.Printf("\n[llamada a herramienta] getCurrentTime() -> %s\n", timeStr)
+
+							_ = session.SendToolResponse(genai.LiveToolResponseInput{
+								FunctionResponses: []*genai.FunctionResponse{
+									{
+										ID:   fc.ID,
+										Name: fc.Name,
+										Response: map[string]any{
+											"currentTime": timeStr,
+										},
+									},
+								},
+							})
 						}
 					}
 				}

@@ -45,9 +45,11 @@ import (
 
 	"periph.io/x/conn/v3/gpio"
 	"periph.io/x/conn/v3/gpio/gpioreg"
+	"periph.io/x/conn/v3/gpio/gpiotest"
 	"periph.io/x/conn/v3/physic"
 	"periph.io/x/conn/v3/spi"
 	"periph.io/x/conn/v3/spi/spireg"
+	"periph.io/x/conn/v3/spi/spitest"
 	"periph.io/x/host/v3"
 )
 
@@ -481,7 +483,14 @@ type Display struct {
 }
 
 func openDisplay(name string, mhz int, dc gpio.PinOut) *Display {
-	p, err := spireg.Open(name)
+	var p spi.PortCloser
+	var err error
+	if os.Getenv("ENV") == "local" {
+		log.Println("Running on PC: Using empty mock SPI port")
+		p = &spitest.Record{}
+	} else {
+		p, err = spireg.Open(name)
+	}
 	if err != nil {
 		log.Fatalf("open %s: %v", name, err)
 	}
@@ -560,7 +569,7 @@ func (d *Display) close() { _ = d.port.Close() }
 // GPIO helpers and main loop
 // ---------------------------------------------------------------------------
 
-func mustPinOut(name string) gpio.PinOut {
+func mustPinOut(name string) gpio.PinIO {
 	p := gpioreg.ByName(name)
 	if p == nil {
 		log.Fatalf("gpio %q not found", name)
@@ -609,13 +618,27 @@ func initDisplay(lock *string) {
 	fps := flag.Int("fps", 45, "target frames per second")
 	flag.Parse()
 
+	var dcEye gpio.PinIO
+	var dcMouth gpio.PinIO
+	var rst gpio.PinIO
+
+	if os.Getenv("ENV") == "local" {
+		log.Println("Running on PC: Using empty mock SPI port")
+
+		dcEye = &gpiotest.Pin{}
+		dcMouth = &gpiotest.Pin{}
+		rst = &gpiotest.Pin{}
+	} else {
+
+		dcEye = mustPinOut(*dcEyeName)
+		dcMouth = mustPinOut(*dcMouthName)
+		rst = mustPinOut(*rstName)
+
+	}
+
 	if _, err := host.Init(); err != nil {
 		log.Fatalf("periph init: %v", err)
 	}
-
-	dcEye := mustPinOut(*dcEyeName)
-	dcMouth := mustPinOut(*dcMouthName)
-	rst := mustPinOut(*rstName)
 
 	eye := openDisplay(*eyePort, *hz, dcEye)
 	mouth := openDisplay(*mouthPort, *hz, dcMouth)
