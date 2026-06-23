@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -24,7 +25,7 @@ func main() {
 
 	isMicOpen := false
 	isCommandOpen := false
-	fatialState := make(chan AnimState)
+	fatialState := flag.String("state", "asleep", "")
 
 	go initDisplay(fatialState)
 
@@ -46,10 +47,10 @@ func main() {
 		isMicOpen = active
 		if active {
 			fmt.Println("Speech enabled.")
-			fatialState <- Neutral
+			*fatialState = "neutral"
 		} else {
 			fmt.Println("Speech disabled.")
-			fatialState <- Asleep
+			*fatialState = "asleep"
 		}
 	}
 
@@ -72,16 +73,16 @@ func main() {
 	defer showCommandEnabled(false)
 
 	go func() {
-		fatialState <- Asleep
+		*fatialState = "asleep"
 	}()
 
 	go func() {
 		for {
 			for !rb.IsEmpty() {
-				fatialState <- Speaking
+				*fatialState = "speaking"
 			}
 			if isMicOpen {
-				fatialState <- Neutral
+				*fatialState = "neutral"
 			}
 		}
 	}()
@@ -91,8 +92,8 @@ func main() {
 			select {
 			case <-startSession:
 				session, err := Session(ctx, func(data []byte) { rb.Write(data) }, func() {
-					enableSpeech(false)
 					rb.Reset()
+					enableSpeech(false)
 				}, inAudio, endSession)
 				enableSpeech(true)
 				if err != nil {

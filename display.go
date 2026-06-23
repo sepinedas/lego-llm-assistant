@@ -1,33 +1,43 @@
-// legoeyes — animated LEGO-brick eyes on two GC9A01 (240×240) circular LCDs.
+// legoface drives two round GC9A01 240x240 LCDs over the same SPI bus and
+// renders a bright cartoon face: an animated eye on one display and a
+// mouth on the other. Three moods are supported: neutral, speaking, asleep.
 //
-// Wiring (Raspberry Pi header):
+// Wiring (Raspberry Pi defaults, both panels share everything except CS):
 //
-//   Signal     │ RPi pin │ Both displays unless noted
-//   ───────────┼─────────┼──────────────────────────
-//   SPI MOSI   │ GPIO10  │ SDA  (shared)
-//   SPI SCLK   │ GPIO11  │ SCL  (shared)
-//   CS left    │ GPIO8   │ CS   (left eye  – SPI0.0)
-//   CS right   │ GPIO7   │ CS   (right eye – SPI0.1)
-//   DC left    │ GPIO24  │ D/C  (left eye)
-//   DC right   │ GPIO25  │ D/C  (right eye)
-//   RST        │ GPIO23  │ RST  (shared, tie together)
-//   3.3 V      │ pin 1   │ VCC
-//   GND        │ pin 6   │ GND
+//	Panel signal | Pi pin            | Notes
+//	-------------+-------------------+--------------------------------
+//	VCC          | 3V3               |
+//	GND          | GND               |
+//	DIN / MOSI   | GPIO10  (SPI0)    | shared
+//	CLK / SCLK   | GPIO11  (SPI0)    | shared
+//	CS  (eye)    | GPIO8   (CE0)     | -> SPI0.0
+//	CS  (mouth)  | GPIO7   (CE1)     | -> SPI0.1
+//	DC  (eye)    | GPIO25            | per-panel (-dc-eye)
+//	DC  (mouth)  | GPIO24            | per-panel (-dc-mouth)
+//	RST          | GPIO27            | shared (-rst)
+//	BL           | tie to 3V3        | no GPIO used
 //
-// Enable SPI on the Pi:  sudo raspi-config → Interface Options → SPI → Yes
-// Build:  go build -o legoeyes .
-// Run:    sudo ./legoeyes
+// Each panel now has its own DC line. RST is shared because the controllers
+// only latch it while their own CS is asserted, and periph asserts CS per
+// transaction. There is no backlight pin: tie BL high (or it's always-on).
 //
-// The animation cycles automatically (adjustable via stateCycle in main):
-//   Neutral (5 s) → Speaking (5 s) → Asleep (6 s) → repeat
-// Ctrl-C exits cleanly.
-
+// Build & run:
+//
+//	go mod init legoface
+//	go get periph.io/x/conn/v3 periph.io/x/host/v3
+//	go build -o legoface .
+//	sudo ./legoface                 # auto-cycles the three moods
+//	sudo ./legoface -state speaking  # lock one mood
+//	sudo ./legoface -eye SPI0.1 -mouth SPI0.0   # swap displays
+//
+// If the image looks mirrored/upside down, change the MADCTL byte (0x36) in
+// the init table below.
 package main
 
 import (
+	"flag"
 	"log"
 	"math"
-	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -35,779 +45,615 @@ import (
 
 	"periph.io/x/conn/v3/gpio"
 	"periph.io/x/conn/v3/gpio/gpioreg"
-	"periph.io/x/conn/v3/gpio/gpiotest"
 	"periph.io/x/conn/v3/physic"
 	"periph.io/x/conn/v3/spi"
 	"periph.io/x/conn/v3/spi/spireg"
-	"periph.io/x/conn/v3/spi/spitest"
 	"periph.io/x/host/v3"
 )
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  Display constants                                                        ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
 const (
-	screenW   = 240                   // GC9A01 width  (pixels)
-	screenH   = 240                   // GC9A01 height (pixels)
-	brickPx   = 10                    // pixels per LEGO brick → 24 × 24 grid
-	gridN     = screenW / brickPx     // = 24
-	frameSize = screenW * screenH * 2 // RGB565 bytes per full frame
-
-	targetFPS = 30
-	frameDT   = 1.0 / float64(targetFPS)
-
-	// Eye geometry (brick-unit values; gridN=24, scaled ×2 vs 12-grid)
-	outerR   = 11.0 // edge of rendered circle (corners → background)
-	rimR     = 9.0  // outer sclera edge (narrow dark ring inside outerR)
-	irisRst  = 4.6  // iris radius at rest
-	pupilRst = 2.6  // pupil radius at rest
-
-	// Mouth geometry (brick units, ×2 scale vs 12-grid)
-	mouthOvalW = 10.4 // oval half-width
-	mouthOvalH = 8.0  // oval half-height
-	mouthLipT  = 3.5  // lip thickness — thin
+	W = 240
+	H = 240
 )
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  Colour helpers                                                           ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// ---------------------------------------------------------------------------
+// Colors (RGB565)
+// ---------------------------------------------------------------------------
 
-type col struct{ r, g, b uint8 }
-
-func sat8(v int) uint8 {
-	if v < 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return uint8(v)
+func rgb(r, g, b uint8) uint16 {
+	return (uint16(r&0xF8) << 8) | (uint16(g&0xFC) << 3) | uint16(b>>3)
 }
 
-func (c col) dim(n int) col { return col{sat8(int(c.r) - n), sat8(int(c.g) - n), sat8(int(c.b) - n)} }
-
-func (c col) glow(n int) col { return col{sat8(int(c.r) + n), sat8(int(c.g) + n), sat8(int(c.b) + n)} }
-
-func mix(a, b col, t float64) col {
-	blend := func(x, y uint8) uint8 {
-		return sat8(int(float64(x)*(1-t) + float64(y)*t))
-	}
-	return col{blend(a.r, b.r), blend(a.g, b.g), blend(a.b, b.b)}
-}
-
-// rgb565 encodes to big-endian 16-bit RGB565 (as used by GC9A01).
-func (c col) rgb565() (byte, byte) {
-	v := uint16(c.r>>3)<<11 | uint16(c.g>>2)<<5 | uint16(c.b>>3)
-	return byte(v >> 8), byte(v)
-}
-
-// ── LEGO palette ──────────────────────────────────────────────────────────
 var (
-	colBg      = col{18, 18, 30}    // eye socket / display corners (dark navy)
-	colLid     = col{52, 46, 82}    // eyelid surface – distinct purple-navy
-	colLidEdge = col{75, 68, 112}   // lash-line highlight at the lid boundary
-	colSclera  = col{248, 248, 252} // white of eye
-	colIris    = col{25, 102, 212}  // resting LEGO blue iris
-	colIrisFx  = col{55, 160, 255}  // speaking iris glow (brighter blue)
-	colPupil   = col{8, 8, 14}      // near-black pupil
-	colHilite  = col{255, 255, 255} // corneal highlight
-
-	// Mouth palette
-	colLip          = col{200, 78, 88}   // LEGO red-pink lip
-	colTeeth        = col{245, 245, 250} // white teeth
-	colMouth        = col{20, 7, 9}      // dark inner mouth cavity
-	colTongue       = col{218, 112, 118} // pink tongue
-	colTongueGroove = col{185, 88, 93}   // darker median sulcus groove
+	colBg      = rgb(16, 18, 22)    // off-screen / shutdown
+	colHole    = rgb(34, 38, 40)    // (pin-hole interior, used by curvedBeam)
+	colHoleRim = rgb(70, 76, 74)    // (pin-hole rim, used by curvedBeam)
+	colIris    = rgb(70, 150, 235)  // cartoon iris (blue)
+	colIris2   = rgb(38, 100, 195)  // iris rim (darker)
+	colPupil   = rgb(8, 10, 12)     // pupil
+	colCatch   = rgb(245, 248, 255) // catchlight
+	colPink    = rgb(235, 120, 130) // rosy cheeks
+	colPink2   = rgb(250, 178, 184) // cheek / tongue highlight
+	colSkin    = rgb(255, 205, 70)  // cartoon "skin" filling each screen
+	colSkinSh  = rgb(232, 176, 48)  // skin shadow / lip highlight
+	colOutline = rgb(30, 26, 34)    // bold cartoon outline
+	colWhite   = rgb(250, 250, 252) // eyeball / teeth
+	colMouthIn = rgb(124, 36, 48)   // open-mouth interior
+	colTongue  = rgb(236, 96, 110)  // tongue
+	colZ       = rgb(120, 170, 235) // sleepy Z's
 )
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  GC9A01 driver                                                            ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// ---------------------------------------------------------------------------
+// Canvas: a uint16 RGB565 framebuffer with drawing primitives
+// ---------------------------------------------------------------------------
 
-// Display wraps a single GC9A01 over periph.io SPI.
-type Display struct {
-	conn spi.Conn
-	dc   gpio.PinIO
-}
+type Canvas struct{ pix []uint16 }
 
-func newDisplay(conn spi.Conn, dc gpio.PinIO) *Display { return &Display{conn: conn, dc: dc} }
+func newCanvas() *Canvas { return &Canvas{pix: make([]uint16, W*H)} }
 
-func (d *Display) cmd(c byte) {
-	_ = d.dc.Out(gpio.Low)
-	_ = d.conn.Tx([]byte{c}, nil)
-}
-
-func (d *Display) data(v ...byte) {
-	_ = d.dc.Out(gpio.High)
-	_ = d.conn.Tx(v, nil)
-}
-
-func (d *Display) reg(cmd byte, args ...byte) {
-	d.cmd(cmd)
-	if len(args) > 0 {
-		d.data(args...)
+func (c *Canvas) clear(col uint16) {
+	for i := range c.pix {
+		c.pix[i] = col
 	}
 }
 
-// Init sends the full GC9A01 power-on initialisation sequence.
-// A hardware reset must be performed before calling Init.
-func (d *Display) Init() {
-	d.cmd(0xEF)
-	d.reg(0xEB, 0x14)
-	d.cmd(0xFE)
-	d.cmd(0xEF)
-	d.reg(0xEB, 0x14)
-	d.reg(0x84, 0x40)
-	d.reg(0x85, 0xFF)
-	d.reg(0x86, 0xFF)
-	d.reg(0x87, 0xFF)
-	d.reg(0x88, 0x0A)
-	d.reg(0x89, 0x21)
-	d.reg(0x8A, 0x00)
-	d.reg(0x8B, 0x80)
-	d.reg(0x8C, 0x01)
-	d.reg(0x8D, 0x01)
-	d.reg(0x8E, 0xFF)
-	d.reg(0x8F, 0xFF)
-	d.reg(0xB6, 0x00, 0x20) // Display Function Control
-	d.reg(0x36, 0x08)       // MADCTL – normal scan direction, RGB order
-	d.reg(0x3A, 0x05)       // Interface Pixel Format: 16-bit RGB565
-	d.reg(0x90, 0x08, 0x08, 0x08, 0x08)
-	d.reg(0xBD, 0x06)
-	d.reg(0xBC, 0x00)
-	d.reg(0xFF, 0x60, 0x01, 0x04)
-	d.reg(0xC3, 0x13) // Power Control 2
-	d.reg(0xC4, 0x13) // Power Control 3
-	d.reg(0xC9, 0x22)
-	d.reg(0xBE, 0x11)
-	d.reg(0xE1, 0x10, 0x0E)
-	d.reg(0xDF, 0x21, 0x0C, 0x02)
-	d.reg(0xF0, 0x45, 0x09, 0x08, 0x08, 0x26, 0x2A) // Gamma (+)
-	d.reg(0xF1, 0x43, 0x70, 0x72, 0x36, 0x37, 0x6F)
-	d.reg(0xF2, 0x45, 0x09, 0x08, 0x08, 0x26, 0x2A) // Gamma (−)
-	d.reg(0xF3, 0x43, 0x70, 0x72, 0x36, 0x37, 0x6F)
-	d.reg(0xED, 0x1B, 0x0B)
-	d.reg(0xAE, 0x77)
-	d.reg(0xCD, 0x63)
-	d.reg(0x70, 0x07, 0x07, 0x04, 0x0E, 0x0F, 0x09, 0x07, 0x08, 0x03)
-	d.reg(0xE8, 0x34)
-	d.reg(0x62, 0x18, 0x0D, 0x71, 0xED, 0x70, 0x70, 0x18, 0x0F, 0x71, 0xEF, 0x70, 0x70)
-	d.reg(0x63, 0x18, 0x11, 0x71, 0xF1, 0x70, 0x70, 0x18, 0x13, 0x71, 0xF3, 0x70, 0x70)
-	d.reg(0x64, 0x28, 0x29, 0xF1, 0x01, 0xF1, 0x00, 0x07)
-	d.reg(0x66, 0x3C, 0x00, 0xCD, 0x67, 0x45, 0x45, 0x10, 0x00, 0x00, 0x00)
-	d.reg(0x67, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x01, 0x54, 0x10, 0x32, 0x98)
-	d.reg(0x74, 0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00)
-	d.reg(0x98, 0x3E, 0x07)
-	d.cmd(0x35) // Tearing Effect Line ON
-	d.cmd(0x21) // Display Inversion ON  (required by most GC9A01 modules)
-	d.cmd(0x11) // Sleep Out
-	time.Sleep(120 * time.Millisecond)
-	d.cmd(0x29) // Display ON
-	time.Sleep(20 * time.Millisecond)
-}
-
-// Flush sends a full RGB565 frame buffer to the display in 4 KiB chunks
-// (Linux SPI buffers are typically limited to 4096 bytes per transfer).
-func (d *Display) Flush(buf []byte) {
-	d.cmd(0x2A) // Column Address Set: 0 … 239
-	d.data(0x00, 0x00, 0x00, 0xEF)
-	d.cmd(0x2B) // Row Address Set: 0 … 239
-	d.data(0x00, 0x00, 0x00, 0xEF)
-	d.cmd(0x2C) // Memory Write – enter pixel-data mode
-	_ = d.dc.Out(gpio.High)
-	const chunkSz = 4096
-	for off := 0; off < len(buf); off += chunkSz {
-		end := off + chunkSz
-		if end > len(buf) {
-			end = len(buf)
+func (c *Canvas) fillRect(x, y, w, h int, col uint16) {
+	for j := y; j < y+h; j++ {
+		if j < 0 || j >= H {
+			continue
 		}
-		_ = d.conn.Tx(buf[off:end], nil)
-	}
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  LEGO-brick eye renderer                                                  ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-// EyeParams holds all animatable eye state for one eye.
-type EyeParams struct {
-	EyelidT    float64 // 0 = fully open → 1 = top lid fully closed
-	BottomLidT float64 // 0 = fully open → 1 = bottom lid fully closed
-	PupilDX    float64 // gaze offset in brick-units (right = positive)
-	PupilDY    float64 // gaze offset in brick-units (down  = positive)
-	IrisR      float64 // iris radius  (brick-units)
-	PupilR     float64 // pupil radius (brick-units)
-	IrisBright float64 // 0 = resting blue → 1 = speaking glow
-}
-
-func restingParams() EyeParams {
-	return EyeParams{IrisR: irisRst, PupilR: pupilRst}
-}
-
-// Eye centre in float brick-space.
-const (
-	eyeCX = float64(gridN) / 2.0 // = 6.0
-	eyeCY = float64(gridN) / 2.0
-)
-
-// brickBase returns the LEGO palette colour for brick (bx, by).
-// It evaluates the eye anatomy layers from outside inward.
-func brickBase(bx, by int, p EyeParams) col {
-	bfx := float64(bx) + 0.5 // brick centre, floating
-	bfy := float64(by) + 0.5
-
-	// ── 1. Circular boundary of the round display ───────────────────────
-	dx := bfx - eyeCX
-	dy := bfy - eyeCY
-	eyeDist := math.Sqrt(dx*dx + dy*dy)
-	if eyeDist > outerR {
-		return colBg
-	}
-
-	// ── 2. Dual eyelids ──────────────────────────────────────────────────
-	//   topLidThresh: threshold below which the top lid covers (from top down).
-	//   botLidThresh: threshold above which the bottom lid covers (from bottom up).
-	//   At eyelidT=0.54, bottomLidT=0.46 the two thresholds meet (~eyeCY+0.04)
-	//   so the eye is fully and cleanly closed.
-	topLidThresh := eyeCY - outerR + p.EyelidT*(2*outerR)
-	botLidThresh := eyeCY + outerR - p.BottomLidT*(2*outerR)
-
-	if bfy < topLidThresh {
-		// Lash-line: the final brick row just before the boundary gets a bright edge.
-		if bfy >= topLidThresh-1.0 {
-			return colLidEdge
-		}
-		return colLid
-	}
-	if bfy > botLidThresh {
-		if bfy <= botLidThresh+1.0 {
-			return colLidEdge
-		}
-		return colLid
-	}
-
-	// ── 3. Narrow dark ring (eye socket rim between outerR and rimR) ─────
-	if eyeDist > rimR {
-		return colBg
-	}
-
-	// ── 4. Pupil & iris (pupil centre can shift for gaze direction) ──────
-	pcx := eyeCX + p.PupilDX
-	pcy := eyeCY + p.PupilDY
-	pdx := bfx - pcx
-	pdy := bfy - pcy
-	pd := math.Sqrt(pdx*pdx + pdy*pdy)
-
-	if pd < p.PupilR {
-		// Corneal highlight: one ~brick-sized spot, upper-left of pupil
-		hdx := bfx - (pcx - 1.3)
-		hdy := bfy - (pcy - 1.3)
-		if math.Sqrt(hdx*hdx+hdy*hdy) < 1.1 {
-			return colHilite
-		}
-		return colPupil
-	}
-
-	if pd < p.IrisR {
-		// Lerp from resting blue to speaking glow
-		return mix(colIris, colIrisFx, p.IrisBright)
-	}
-
-	return colSclera
-}
-
-// brickPixel applies a LEGO brick surface texture:
-//   - 1-pixel bevel (bright top-left, dark bottom-right)
-//   - circular stud in the centre of each brick
-func brickPixel(base col, lx, ly int) col {
-	// ── Bevel ─────────────────────────────────────────────────────────────
-	if lx == brickPx-1 || ly == brickPx-1 {
-		return base.dim(32) // shadow: right & bottom edges
-	}
-	if lx == 0 || ly == 0 {
-		return base.glow(40) // highlight: top & left edges
-	}
-
-	// ── Circular stud centred in each brick ───────────────────────────────
-	//   Proportioned for 5 px bricks: outer ring r≈1.55, inner top r≈1.1.
-	scx := float64(brickPx)/2.0 - 0.5
-	scy := float64(brickPx)/2.0 - 0.5
-	sdx := float64(lx) - scx
-	sdy := float64(ly) - scy
-	sd := math.Sqrt(sdx*sdx + sdy*sdy)
-	if sd < 2.9 {
-		if sd < 1.9 {
-			return base.dim(11) // stud top-face (subtle inset)
-		}
-		return base.glow(42) // stud side-wall (lit by the LEGO sun)
-	}
-
-	return base
-}
-
-// RenderEye writes a full 240×240 RGB565 frame into buf.
-// buf must be at least frameSize bytes.
-func RenderEye(p EyeParams, buf []byte) {
-	for y := 0; y < screenH; y++ {
-		for x := 0; x < screenW; x++ {
-			base := brickBase(x/brickPx, y/brickPx, p)
-			c := brickPixel(base, x%brickPx, y%brickPx)
-			hi, lo := c.rgb565()
-			i := (y*screenW + x) * 2
-			buf[i] = hi
-			buf[i+1] = lo
-		}
-	}
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  LEGO-brick mouth renderer                                                ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-// MouthParams holds all animatable mouth state.
-type MouthParams struct {
-	OpenT  float64 // 0 = closed,  1 = wide open (lower jaw drops)
-	SmileT float64 // -1 = frown,  0 = neutral,  +1 = full smile
-}
-
-func restingMouthParams() MouthParams {
-	return MouthParams{SmileT: 0.5}
-}
-
-// mouthBrickBase returns the palette colour for mouth brick (bx, by).
-func mouthBrickBase(bx, by int, mp MouthParams) col {
-	bfx := float64(bx) + 0.5
-	bfy := float64(by) + 0.5
-	dx := bfx - eyeCX
-	dy := bfy - eyeCY
-
-	// ── Oval outer boundary ──────────────────────────────────────────────
-	odx := dx / mouthOvalW
-	ody := dy / mouthOvalH
-	if odx*odx+ody*ody > 1.0 {
-		return colBg
-	}
-
-	// ── Smile parabola: positive SmileT lifts corners upward ─────────────
-	xNorm := dx / mouthOvalW                 // -1 … +1 across the oval
-	smile := mp.SmileT * 2.8 * xNorm * xNorm // coeff scaled ×2 vs 12-grid
-
-	upperTop := eyeCY - 3.2 - smile     // top of upper lip
-	upperBot := upperTop + mouthLipT    // bottom of upper lip / top of gap
-	lowerTop := upperBot + mp.OpenT*4.8 // top of lower lip (jaw drops by OpenT)
-	lowerBot := lowerTop + mouthLipT    // bottom of lower lip
-
-	switch {
-	case bfy < upperTop:
-		return colBg // above mouth
-	case bfy < upperBot:
-		return colLip // upper lip
-	case bfy < lowerTop:
-		// Inside the mouth gap
-		if mp.OpenT < 0.04 {
-			return colLip // barely open — lips appear closed
-		}
-		relY := (bfy - upperBot) / (lowerTop - upperBot) // 0=top, 1=bottom of gap
-
-		// Upper teeth (top 35% of gap)
-		if relY < 0.35 {
-			return colTeeth
-		}
-
-		// Tongue: visible as soon as the mouth is open
-		if relY > 0.50 && mp.OpenT > 0.10 {
-			// Tongue narrows the closer to the tip; widens toward the base.
-			tongueEdge := mouthOvalW * 0.72 * (0.75 + (relY-0.50)/0.50*0.25)
-			if math.Abs(dx) > tongueEdge {
-				return colMouth // sides of mouth cavity, past tongue edge
+		base := j * W
+		for i := x; i < x+w; i++ {
+			if i < 0 || i >= W {
+				continue
 			}
-			// Median sulcus: a darker groove running down the centre
-			if math.Abs(dx) < 0.7 {
-				return colTongueGroove
-			}
-			return colTongue
-		}
-
-		return colMouth // dark gap between teeth and tongue
-	case bfy < lowerBot:
-		return colLip // lower lip
-	default:
-		return colBg // below mouth
-	}
-}
-
-// RenderMouth writes a full 240×240 RGB565 frame of the mouth into buf.
-func RenderMouth(mp MouthParams, buf []byte) {
-	for y := 0; y < screenH; y++ {
-		for x := 0; x < screenW; x++ {
-			base := mouthBrickBase(x/brickPx, y/brickPx, mp)
-			c := brickPixel(base, x%brickPx, y%brickPx)
-			hi, lo := c.rgb565()
-			i := (y*screenW + x) * 2
-			buf[i] = hi
-			buf[i+1] = lo
+			c.pix[base+i] = col
 		}
 	}
 }
 
-// AnimState represents one of the three eye moods.
-type AnimState int
-
-const (
-	Neutral  AnimState = iota
-	Speaking AnimState = iota
-	Asleep   AnimState = iota
-)
-
-func (s AnimState) String() string {
-	return [...]string{"Neutral", "Speaking", "Asleep"}[s]
-}
-
-// Animator maintains per-eye animation state and advances it each tick.
-//
-// All parameters are smoothed so that state transitions look organic rather
-// than snapping to a new position.  The blinkOffset staggers the two eye
-// blink clocks so both eyes never blink at exactly the same moment.
-type Animator struct {
-	state   AnimState
-	elapsed float64 // seconds elapsed in current state
-	p       EyeParams
-
-	// Neutral-state blink timers
-	blinkCD    float64 // countdown (s) until next blink begins
-	blinkTimer float64 // >0 while a blink is in progress
-
-	// Speaking-state rhythm phase
-	beatPhase float64
-}
-
-// NewAnimator creates a fresh Animator starting in the Neutral state.
-// blinkOffset shifts the blink clock so two eyes are not perfectly in sync.
-func NewAnimator(blinkOffset float64) *Animator {
-	return &Animator{
-		state:   Neutral,
-		p:       restingParams(),
-		blinkCD: 2.0 + blinkOffset + rand.Float64()*1.5,
-	}
-}
-
-// SetState requests a transition to state s.
-// The animation parameters carry over smoothly; only the clocks are reset.
-func (a *Animator) SetState(s AnimState) {
-	if s == a.state {
+func (c *Canvas) fillCircle(cx, cy, r int, col uint16) {
+	if r < 0 {
 		return
 	}
-	a.state = s
-	a.elapsed = 0
-	a.beatPhase = 0
-}
-
-// Tick advances the animation by dt seconds and returns the current EyeParams.
-func (a *Animator) Tick(dt float64) EyeParams {
-	a.elapsed += dt
-
-	switch a.state {
-
-	// ── Neutral ──────────────────────────────────────────────────────────
-	//  · Organic, slow gaze drift.
-	//  · Random blinks every 2.8–5 s; eyelid snaps to full closure then reopens.
-	//  · Iris / pupil sizes and brightness drift back to resting values.
-	case Neutral:
-		// Smooth return to resting iris / pupil sizes
-		a.p.IrisR += (irisRst - a.p.IrisR) * dt * 5
-		a.p.PupilR += (pupilRst - a.p.PupilR) * dt * 5
-		// Speaking glow decays quickly
-		a.p.IrisBright *= math.Pow(0.02, dt) // → 0 in ~0.8 s
-
-		// Slow, lissajous-style gaze drift (looks natural, never repeats)
-		a.p.PupilDX = math.Sin(a.elapsed*0.41) * 0.44
-		a.p.PupilDY = math.Cos(a.elapsed*0.31) * 0.34
-
-		// Blink logic
-		a.blinkCD -= dt
-		if a.blinkCD <= 0 {
-			// A blink is in progress
-			a.blinkTimer += dt
-			const halfBlink = 0.13 // seconds per closing/opening half
-			switch {
-			case a.blinkTimer < halfBlink:
-				// Closing phase: top lid closes fully, bottom dips 25%
-				frac := a.blinkTimer / halfBlink
-				a.p.EyelidT = frac
-				a.p.BottomLidT = frac * 0.25
-			case a.blinkTimer < 2*halfBlink:
-				// Opening phase
-				frac := 1 - (a.blinkTimer-halfBlink)/halfBlink
-				a.p.EyelidT = frac
-				a.p.BottomLidT = frac * 0.25
-			default:
-				// Blink complete; schedule the next one
-				a.blinkTimer = 0
-				a.blinkCooldown()
-				a.p.EyelidT = 0
-				a.p.BottomLidT = 0
-			}
-		} else {
-			// Not blinking: smoothly open both lids in case we just
-			// transitioned from Asleep or a Speaking squint.
-			a.p.EyelidT *= math.Pow(0.005, dt) // reaches ~0 in ~1 s
-			a.p.BottomLidT *= math.Pow(0.005, dt)
+	r2 := r * r
+	for y := -r; y <= r; y++ {
+		py := cy + y
+		if py < 0 || py >= H {
+			continue
 		}
-
-	// ── Speaking ─────────────────────────────────────────────────────────
-	//  · Multi-harmonic "speech rhythm" drives iris dilation and brightness.
-	//  · Pupils dart left-right with sentence stress.
-	//  · Slight squint on stressed syllables.
-	case Speaking:
-		a.beatPhase += dt * 5.5
-		// Primary beat + a faster secondary for irregular feel
-		beat := math.Sin(a.beatPhase)*0.7 + math.Sin(a.beatPhase*2.1)*0.3
-
-		targetIrisR := 5.0 + beat*0.26
-		targetPupilR := 2.7 + math.Abs(beat)*0.18
-		targetBright := 0.22 + math.Abs(beat)*0.38
-
-		speed := dt * 8.0
-		a.p.IrisR += (targetIrisR - a.p.IrisR) * speed
-		a.p.PupilR += (targetPupilR - a.p.PupilR) * speed
-		a.p.IrisBright += (targetBright - a.p.IrisBright) * speed
-
-		// Gaze darts with speech stress; Y follows beat, X drifts independently
-		a.p.PupilDX = math.Sin(a.elapsed*3.1) * 0.56
-		a.p.PupilDY = beat * 0.36
-
-		// Open the bottom lid fully (in case we came from Asleep)
-		// then apply stress-squint only to the top lid
-		squint := math.Max(0, beat*0.09)
-		a.p.EyelidT += (squint - a.p.EyelidT) * dt * 7
-		a.p.BottomLidT += (0 - a.p.BottomLidT) * dt * 4
-
-	// ── Asleep ────────────────────────────────────────────────────────────
-	//  · Top lid drifts to 0.54, bottom lid to 0.46 – they meet cleanly at centre.
-	//  · Iris and pupil contract as consciousness fades.
-	//  · Tiny REM-style twitches are visible while the lids are still parting.
-	case Asleep:
-		a.p.EyelidT += (0.54 - a.p.EyelidT) * dt * 2.2
-		a.p.BottomLidT += (0.46 - a.p.BottomLidT) * dt * 1.8
-		a.p.IrisR += (2.6 - a.p.IrisR) * dt * 2.5
-		a.p.PupilR += (0.9 - a.p.PupilR) * dt * 2.5
-		a.p.IrisBright *= math.Pow(0.01, dt) // dim to 0
-
-		// Subtle dream-twitches (only perceptible while lids are still parting)
-		a.p.PupilDX = math.Sin(a.elapsed*0.8) * 0.14
-		a.p.PupilDY = math.Cos(a.elapsed*0.6) * 0.12
-	}
-
-	return a.p
-}
-
-// blinkCooldown resets the blink countdown with a random interval.
-func (a *Animator) blinkCooldown() {
-	a.blinkCD = 2.8 + rand.Float64()*2.2
-}
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  Mouth animation state machine                                            ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-// MouthAnimator drives the mouth display independently from the eye animator.
-// It reacts to the same AnimState but animates OpenT and SmileT instead.
-type MouthAnimator struct {
-	state     AnimState
-	elapsed   float64
-	beatPhase float64
-	mp        MouthParams
-}
-
-func NewMouthAnimator() *MouthAnimator {
-	return &MouthAnimator{
-		state: Neutral,
-		mp:    restingMouthParams(),
+		rem := r2 - y*y
+		if rem < 0 {
+			continue
+		}
+		xe := int(math.Sqrt(float64(rem)))
+		x0, x1 := cx-xe, cx+xe
+		if x0 < 0 {
+			x0 = 0
+		}
+		if x1 >= W {
+			x1 = W - 1
+		}
+		base := py * W
+		for x := x0; x <= x1; x++ {
+			c.pix[base+x] = col
+		}
 	}
 }
 
-func (m *MouthAnimator) SetState(s AnimState) {
-	if s == m.state {
+// ring draws a filled annulus between rIn and rOut.
+func (c *Canvas) ring(cx, cy, rOut, rIn int, col uint16) {
+	ro2, ri2 := rOut*rOut, rIn*rIn
+	for y := -rOut; y <= rOut; y++ {
+		py := cy + y
+		if py < 0 || py >= H {
+			continue
+		}
+		yy := y * y
+		base := py * W
+		for x := -rOut; x <= rOut; x++ {
+			d := x*x + yy
+			if d <= ro2 && d >= ri2 {
+				px := cx + x
+				if px >= 0 && px < W {
+					c.pix[base+px] = col
+				}
+			}
+		}
+	}
+}
+
+func (c *Canvas) fillRoundRect(x, y, w, h, r int, col uint16) {
+	if 2*r > h {
+		r = h / 2
+	}
+	if 2*r > w {
+		r = w / 2
+	}
+	c.fillRect(x+r, y, w-2*r, h, col)
+	c.fillRect(x, y+r, r, h-2*r, col)
+	c.fillRect(x+w-r, y+r, r, h-2*r, col)
+	c.fillCircle(x+r, y+r, r, col)
+	c.fillCircle(x+w-r-1, y+r, r, col)
+	c.fillCircle(x+r, y+h-r-1, r, col)
+	c.fillCircle(x+w-r-1, y+h-r-1, r, col)
+}
+
+// ---------------------------------------------------------------------------
+// Mood + rendering
+// ---------------------------------------------------------------------------
+
+type State int
+
+const (
+	Neutral State = iota
+	Speaking
+	Asleep
+)
+
+func drawEye(c *Canvas, st State, t float64) {
+	c.clear(colSkin)
+	cx, cy := W/2, H/2
+
+	if st == Asleep {
+		yoff := int(2 * math.Sin(t*1.6)) // gentle breathing
+		// closed sleepy eye: a soft convex-up arc with two little lashes
+		const er = 86
+		bcy := cy + er + yoff // arc-circle centre below -> its top curves up
+		c.curvedBeam(cx, bcy, er, 7, deg(236), deg(304), colOutline, false)
+		for _, a := range []float64{deg(236), deg(304)} {
+			ex := cx + int(float64(er)*math.Cos(a))
+			ey := bcy + int(float64(er)*math.Sin(a))
+			c.stroke(ex, ey, ex+int(15*math.Cos(a)), ey+int(15*math.Sin(a)), 4, colOutline)
+		}
+		// floating Z's drifting up and to the right
+		base := math.Mod(t, 4.0) / 4.0
+		for i := 0; i < 3; i++ {
+			ph := math.Mod(base+float64(i)/3.0, 1.0)
+			c.drawZ(150+int(ph*45), 96-int(ph*72), 8+i*3, 4, colZ)
+		}
 		return
 	}
-	m.state = s
-	m.elapsed = 0
-	m.beatPhase = 0
-}
 
-// Tick advances the mouth animation by dt seconds and returns current MouthParams.
-func (m *MouthAnimator) Tick(dt float64) MouthParams {
-	m.elapsed += dt
-
-	smooth := func(cur, tgt, speed float64) float64 {
-		return cur + (tgt-cur)*math.Min(1.0, dt*speed)
-	}
-
-	switch m.state {
-
-	// ── Neutral ───────────────────────────────────────────────────────────
-	//  · Lips closed, gentle resting smile.
+	blink := 0.0
+	lookX, lookY := 0, 0
+	brow := 0.25 // eyebrow raise
+	switch st {
 	case Neutral:
-		m.mp.OpenT = smooth(m.mp.OpenT, 0.0, 4.0)
-		m.mp.SmileT = smooth(m.mp.SmileT, 0.50, 4.0)
-
-	// ── Speaking ──────────────────────────────────────────────────────────
-	//  · Lower jaw bobs with the speech-beat rhythm.
-	//  · Smile flexes slightly on stressed syllables.
-	//  · Tongue becomes visible on wide-open frames.
+		if ph := math.Mod(t, 3.5); ph < 0.18 {
+			blink = math.Sin(ph / 0.18 * math.Pi)
+		}
+		lookX = int(7 * math.Sin(t*0.7))
+		lookY = int(5 * math.Sin(t*0.9+1))
 	case Speaking:
-		m.beatPhase += dt * 5.5
-		beat := math.Sin(m.beatPhase)*0.7 + math.Sin(m.beatPhase*2.1)*0.3
-		m.mp.OpenT = smooth(m.mp.OpenT, 0.25+math.Abs(beat)*0.55, 9.0)
-		m.mp.SmileT = smooth(m.mp.SmileT, 0.40+beat*0.10, 9.0)
-
-	// ── Asleep ────────────────────────────────────────────────────────────
-	//  · Jaw slackens very slightly (small snore oscillation).
-	//  · Corners of mouth relax into a subtle frown.
-	case Asleep:
-		snore := math.Sin(m.elapsed*1.8) * 0.03
-		m.mp.OpenT = smooth(m.mp.OpenT, 0.04+snore, 1.8)
-		m.mp.SmileT = smooth(m.mp.SmileT, -0.18, 1.8)
+		if ph := math.Mod(t, 2.4); ph < 0.14 {
+			blink = math.Sin(ph / 0.14 * math.Pi)
+		}
+		lookX = int(9 * math.Sin(t*1.5))
+		lookY = int(3 * math.Sin(t*6))
+		brow = 0.55 + 0.2*math.Sin(t*4) // lively raised brow while talking
 	}
 
-	return m.mp
+	const er = 86
+
+	// eyebrow: a short convex-up cartoon arc above the eye
+	browTop := cy - er - 12 - int(brow*16)
+	c.curvedBeam(cx, browTop+74, 74, 7, deg(270-18), deg(270+18), colOutline, false)
+
+	// eyeball: white with a bold black outline
+	c.fillCircle(cx, cy, er+6, colOutline)
+	c.fillCircle(cx, cy, er, colWhite)
+
+	// iris, pupil and two glossy catchlights
+	ix, iy := cx+lookX, cy+lookY+8
+	ir := 48
+	c.fillCircle(ix, iy, ir+4, colOutline)
+	c.fillCircle(ix, iy, ir, colIris)
+	c.ring(ix, iy, ir, ir-8, colIris2)
+	c.fillCircle(ix, iy, 25, colPupil)
+	c.fillCircle(ix-12, iy-14, 11, colCatch)
+	c.fillCircle(ix+11, iy+9, 5, colCatch)
+
+	// blink: skin-colored lids sweep in from top and bottom with a lash line
+	if blink > 0.01 {
+		drawLid(c, cx, cy, er, true, blink)
+		drawLid(c, cx, cy, er, false, blink)
+	}
 }
 
-func initDisplay(stateCh chan AnimState) {
-	log.Println("legoeyes: starting")
-	var portL spi.PortCloser
-	var portR spi.PortCloser
-	var dcL gpio.PinIO
-	var dcR gpio.PinIO
-	var rst gpio.PinIO
-	var err error
-	// Check if we are running locally on a PC
-	if os.Getenv("ENV") == "local" {
-		log.Println("Running on PC: Using empty mock SPI port")
-		// 1. Create a dummy port that logs writes and does nothing on read
-		portL = &spitest.Record{}
-		portR = &spitest.Record{} // 1. Create a simulated Pin.
-		dcL = &gpiotest.Pin{
-			N:   "GPIO25",
-			Num: 21,
-			Fn:  "I/O",
-		}
-		dcR = &gpiotest.Pin{
-			N:   "GPIO22",
-			Num: 21,
-			Fn:  "I/O",
-		}
-		rst = &gpiotest.Pin{
-			N:   "GPIO27",
-			Num: 21,
-			Fn:  "I/O",
-		}
+// drawLid sweeps a smooth skin eyelid over the eye. p: 0 = open, 1 = shut.
+func drawLid(c *Canvas, cx, cy, er int, top bool, p float64) {
+	const LR = 280 // big radius -> the lid edge is a gentle curve
+	if top {
+		edge := lerpi(cy-er-14, cy+3, p)
+		lcy := edge - LR
+		c.fillCircle(cx, lcy, LR, colSkin)
+		c.curvedBeam(cx, lcy, LR, 4, deg(90-7), deg(90+7), colOutline, false)
 	} else {
-		// 2. Production: Use real hardware
-		if _, err := host.Init(); err != nil {
-			log.Fatal(err)
+		edge := lerpi(cy+er+14, cy-3, p)
+		lcy := edge + LR
+		c.fillCircle(cx, lcy, LR, colSkin)
+		c.curvedBeam(cx, lcy, LR, 3, deg(270-7), deg(270+7), colOutline, false)
+	}
+}
+
+func deg(d float64) float64 { return d * math.Pi / 180 }
+
+func lerpi(a, b int, t float64) int { return a + int(float64(b-a)*t) }
+
+// curvedBeam stamps a thick rounded stroke along a circular arc (center
+// cx,cy, radius r, sweeping a0->a1 radians), optionally with Technic pin
+// holes spaced along it.
+func (c *Canvas) curvedBeam(cx, cy, r, half int, a0, a1 float64, col uint16, holes bool) {
+	arcLen := math.Abs(a1-a0) * float64(r)
+	step := half / 2
+	if step < 1 {
+		step = 1
+	}
+	steps := int(arcLen)/step + 1
+	for i := 0; i <= steps; i++ {
+		a := a0 + (a1-a0)*float64(i)/float64(steps)
+		x := cx + int(math.Round(float64(r)*math.Cos(a)))
+		y := cy + int(math.Round(float64(r)*math.Sin(a)))
+		c.fillCircle(x, y, half, col)
+	}
+	if holes && half >= 6 {
+		hr := half * 42 / 100
+		nh := int(arcLen / (float64(half) * 2.4))
+		if nh < 1 {
+			nh = 1
 		}
-		portL, err = spireg.Open("SPI0.1")
-		if err != nil {
-			log.Fatalf("failed to open SPI port: %v", err)
-		}
-		portR, err = spireg.Open("SPI0.0")
-		if err != nil {
-			log.Fatalf("failed to open SPI port: %v", err)
-		}
-		dcL = gpioreg.ByName("GPIO25")
-		if dcL == nil {
-			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO25")
-		}
-		dcR = gpioreg.ByName("GPIO22")
-		if dcR == nil {
-			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO22")
-		}
-		rst = gpioreg.ByName("GPIO27")
-		if rst == nil {
-			log.Panicf("GPIO pin %q not found – check wiring / permissions", "GPIO27")
+		for k := 0; k <= nh; k++ {
+			f := float64(k) / float64(nh)
+			if f < 0.08 || f > 0.92 { // keep holes off the very ends
+				continue
+			}
+			a := a0 + (a1-a0)*f
+			x := cx + int(float64(r)*math.Cos(a))
+			y := cy + int(float64(r)*math.Sin(a))
+			c.fillCircle(x, y, hr+1, colHoleRim)
+			c.fillCircle(x, y, hr-1, colHole)
 		}
 	}
-	if _, err := host.Init(); err != nil {
-		log.Fatal("periph host.Init:", err)
+}
+
+// drawCheeks adds two rosy cartoon cheeks flanking the mouth.
+func (c *Canvas) drawCheeks(cx, cy int) {
+	for _, sx := range []int{-1, 1} {
+		x := cx + sx*90
+		c.fillCircle(x, cy, 18, colPink)
+		c.fillCircle(x-sx*6, cy-5, 6, colPink2)
+	}
+}
+
+// stroke stamps a thick rounded line from (x0,y0) to (x1,y1).
+func (c *Canvas) stroke(x0, y0, x1, y1, th int, col uint16) {
+	dx, dy := x1-x0, y1-y0
+	n := int(math.Hypot(float64(dx), float64(dy)))/2 + 1
+	for i := 0; i <= n; i++ {
+		f := float64(i) / float64(n)
+		c.fillCircle(x0+int(float64(dx)*f), y0+int(float64(dy)*f), th, col)
+	}
+}
+
+// drawZ draws a slanted cartoon "Z" centered at (cx,cy) with half-size s.
+func (c *Canvas) drawZ(cx, cy, s, th int, col uint16) {
+	x0, x1 := cx-s, cx+s
+	yT, yB := cy-s, cy+s
+	c.stroke(x0, yT, x1, yT, th, col)
+	c.stroke(x1, yT, x0, yB, th, col)
+	c.stroke(x0, yB, x1, yB, th, col)
+}
+
+// drawSmile renders a bold cartoon smile. open: 0 = closed grin, 1 = wide
+// open. yoff nudges the whole mouth (used for sleepy breathing).
+func drawSmile(c *Canvas, open float64, yoff int) {
+	if open < 0 {
+		open = 0
+	}
+	if open > 1 {
+		open = 1
+	}
+	const R = 100
+	cx := W / 2
+	cy := H/2 - 64 + yoff       // arc centre above -> the smile curves up at ends
+	a0, a1 := deg(30), deg(150) // wide grin
+	lip := 9
+
+	c.drawCheeks(cx, H/2+20+yoff)
+
+	if open <= 0.06 {
+		// closed cartoon smile: one bold stroke with a soft highlight
+		c.curvedBeam(cx, cy, R, lip, a0, a1, colOutline, false)
+		c.curvedBeam(cx, cy, R-lip+2, 2, deg(44), deg(136), colSkinSh, false)
+		return
 	}
 
-	defer portL.Close()
-	defer portR.Close()
+	gap := 8 + int(open*30)
 
-	// Connect at 40 MHz, SPI mode 0 (CPOL=0 CPHA=0), 8 bits per word.
-	// If you see display glitches try 32 MHz or 20 MHz.
-	mustConn := func(p spi.PortCloser) spi.Conn {
-		c, err := p.Connect(40*physic.MegaHertz, spi.Mode0, 8)
-		if err != nil {
-			log.Fatalf("spi connect %s: %v", err)
+	// bold black outline shell, then the dark interior inset within it
+	c.curvedBeam(cx, cy, R, gap+lip, a0, a1, colOutline, false)
+	c.curvedBeam(cx, cy, R, gap, deg(34), deg(146), colMouthIn, false)
+
+	// smooth white upper teeth; lower teeth appear on a big grin
+	c.curvedBeam(cx, cy, R-gap+6, 7, deg(40), deg(140), colWhite, false)
+	if open > 0.55 {
+		c.curvedBeam(cx, cy, R+gap-6, 5, deg(48), deg(132), colWhite, false)
+	}
+	// tongue with a little sheen
+	if open > 0.4 {
+		c.curvedBeam(cx, cy, R+gap-9, gap*55/100, deg(62), deg(118), colTongue, false)
+		c.curvedBeam(cx, cy, R+gap-9, gap*20/100, deg(80), deg(100), colPink2, false)
+	}
+}
+
+func drawMouth(c *Canvas, st State, t float64) {
+	c.clear(colSkin)
+
+	switch st {
+	case Neutral:
+		drawSmile(c, 0.26, 0) // friendly resting grin showing teeth
+	case Speaking:
+		open := 0.5 + 0.5*math.Sin(t*9)
+		open *= 0.35 + 0.65*math.Abs(math.Sin(t*3.3)) // syllable-ish envelope
+		if open < 0.18 {
+			open = 0.18 // keep a smile even between syllables
 		}
-		return c
+		drawSmile(c, open, 0)
+	case Asleep:
+		yoff := int(2 * math.Sin(t*1.6)) // gentle breathing
+		drawSmile(c, 0.0, yoff)          // peaceful closed smile
 	}
-	connL := mustConn(portL)
-	connR := mustConn(portR)
+}
 
-	// ── Hardware reset (simultaneous for both displays) ───────────────────
-	log.Println("legoeyes: hardware reset")
-	if err := rst.Out(gpio.Low); err != nil {
-		log.Fatal("RST low:", err)
+// ---------------------------------------------------------------------------
+// GC9A01 driver over periph SPI
+// ---------------------------------------------------------------------------
+
+type initStep struct {
+	cmd   byte
+	data  []byte
+	delay time.Duration
+}
+
+// Canonical GC9A01A power-on sequence. 0x36 = MADCTL (orientation/BGR),
+// 0x3A = COLMOD (0x05 -> 16bpp RGB565).
+var initSeq = []initStep{
+	{cmd: 0xEF},
+	{cmd: 0xEB, data: []byte{0x14}},
+	{cmd: 0xFE},
+	{cmd: 0xEF},
+	{cmd: 0xEB, data: []byte{0x14}},
+	{cmd: 0x84, data: []byte{0x40}},
+	{cmd: 0x85, data: []byte{0xFF}},
+	{cmd: 0x86, data: []byte{0xFF}},
+	{cmd: 0x87, data: []byte{0xFF}},
+	{cmd: 0x88, data: []byte{0x0A}},
+	{cmd: 0x89, data: []byte{0x21}},
+	{cmd: 0x8A, data: []byte{0x00}},
+	{cmd: 0x8B, data: []byte{0x80}},
+	{cmd: 0x8C, data: []byte{0x01}},
+	{cmd: 0x8D, data: []byte{0x01}},
+	{cmd: 0x8E, data: []byte{0xFF}},
+	{cmd: 0x8F, data: []byte{0xFF}},
+	{cmd: 0xB6, data: []byte{0x00, 0x20}},
+	{cmd: 0x36, data: []byte{0x48}}, // MADCTL: MX | BGR
+	{cmd: 0x3A, data: []byte{0x05}}, // COLMOD: 16bpp
+	{cmd: 0x90, data: []byte{0x08, 0x08, 0x08, 0x08}},
+	{cmd: 0xBD, data: []byte{0x06}},
+	{cmd: 0xBC, data: []byte{0x00}},
+	{cmd: 0xFF, data: []byte{0x60, 0x01, 0x04}},
+	{cmd: 0xC3, data: []byte{0x13}},
+	{cmd: 0xC4, data: []byte{0x13}},
+	{cmd: 0xC9, data: []byte{0x22}},
+	{cmd: 0xBE, data: []byte{0x11}},
+	{cmd: 0xE1, data: []byte{0x10, 0x0E}},
+	{cmd: 0xDF, data: []byte{0x21, 0x0C, 0x02}},
+	{cmd: 0xF0, data: []byte{0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}},
+	{cmd: 0xF1, data: []byte{0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}},
+	{cmd: 0xF2, data: []byte{0x45, 0x09, 0x08, 0x08, 0x26, 0x2A}},
+	{cmd: 0xF3, data: []byte{0x43, 0x70, 0x72, 0x36, 0x37, 0x6F}},
+	{cmd: 0xED, data: []byte{0x1B, 0x0B}},
+	{cmd: 0xAE, data: []byte{0x77}},
+	{cmd: 0xCD, data: []byte{0x63}},
+	{cmd: 0x70, data: []byte{0x07, 0x07, 0x04, 0x0E, 0x0F, 0x09, 0x07, 0x08, 0x03}},
+	{cmd: 0xE8, data: []byte{0x34}},
+	{cmd: 0x62, data: []byte{0x18, 0x0D, 0x71, 0xED, 0x70, 0x70, 0x18, 0x0F, 0x71, 0xEF, 0x70, 0x70}},
+	{cmd: 0x63, data: []byte{0x18, 0x11, 0x71, 0xF1, 0x70, 0x70, 0x18, 0x13, 0x71, 0xF3, 0x70, 0x70}},
+	{cmd: 0x64, data: []byte{0x28, 0x29, 0xF1, 0x01, 0xF1, 0x00, 0x07}},
+	{cmd: 0x66, data: []byte{0x3C, 0x00, 0xCD, 0x67, 0x45, 0x45, 0x10, 0x00, 0x00, 0x00}},
+	{cmd: 0x67, data: []byte{0x00, 0x3C, 0x00, 0x00, 0x00, 0x01, 0x54, 0x10, 0x32, 0x98}},
+	{cmd: 0x74, data: []byte{0x10, 0x85, 0x80, 0x00, 0x00, 0x4E, 0x00}},
+	{cmd: 0x98, data: []byte{0x3E, 0x07}},
+	{cmd: 0x35},
+	{cmd: 0x21},
+	{cmd: 0x11, delay: 120 * time.Millisecond},
+	{cmd: 0x29, delay: 20 * time.Millisecond},
+}
+
+type Display struct {
+	name   string
+	port   spi.PortCloser
+	c      spi.Conn
+	dc     gpio.PinOut // per-panel
+	canvas *Canvas
+	buf    []byte
+}
+
+func openDisplay(name string, mhz int, dc gpio.PinOut) *Display {
+	p, err := spireg.Open(name)
+	if err != nil {
+		log.Fatalf("open %s: %v", name, err)
 	}
+	conn, err := p.Connect(physic.Frequency(mhz)*physic.MegaHertz, spi.Mode0, 8)
+	if err != nil {
+		log.Fatalf("connect %s: %v", name, err)
+	}
+	return &Display{
+		name:   name,
+		port:   p,
+		c:      conn,
+		dc:     dc,
+		canvas: newCanvas(),
+		buf:    make([]byte, W*H*2),
+	}
+}
+
+func (d *Display) cmd(b byte) {
+	_ = d.dc.Out(gpio.Low)
+	if err := d.c.Tx([]byte{b}, nil); err != nil {
+		log.Printf("%s cmd %#x: %v", d.name, b, err)
+	}
+}
+
+func (d *Display) data(b ...byte) {
+	if len(b) == 0 {
+		return
+	}
+	_ = d.dc.Out(gpio.High)
+	if err := d.c.Tx(b, nil); err != nil {
+		log.Printf("%s data: %v", d.name, err)
+	}
+}
+
+func (d *Display) sendInit() {
+	for _, s := range initSeq {
+		d.cmd(s.cmd)
+		d.data(s.data...)
+		if s.delay > 0 {
+			time.Sleep(s.delay)
+		}
+	}
+}
+
+func (d *Display) setWindow(x0, y0, x1, y1 int) {
+	d.cmd(0x2A)
+	d.data(byte(x0>>8), byte(x0), byte(x1>>8), byte(x1))
+	d.cmd(0x2B)
+	d.data(byte(y0>>8), byte(y0), byte(y1>>8), byte(y1))
+}
+
+func (d *Display) flush() {
+	d.setWindow(0, 0, W-1, H-1)
+	d.cmd(0x2C) // RAMWR
+	for i, v := range d.canvas.pix {
+		d.buf[2*i] = byte(v >> 8)
+		d.buf[2*i+1] = byte(v)
+	}
+	_ = d.dc.Out(gpio.High)
+	const chunk = 4096 // stay within the default spidev bufsiz
+	for off := 0; off < len(d.buf); off += chunk {
+		end := off + chunk
+		if end > len(d.buf) {
+			end = len(d.buf)
+		}
+		if err := d.c.Tx(d.buf[off:end], nil); err != nil {
+			log.Printf("%s flush: %v", d.name, err)
+			return
+		}
+	}
+}
+
+func (d *Display) close() { _ = d.port.Close() }
+
+// ---------------------------------------------------------------------------
+// GPIO helpers and main loop
+// ---------------------------------------------------------------------------
+
+func mustPinOut(name string) gpio.PinOut {
+	p := gpioreg.ByName(name)
+	if p == nil {
+		log.Fatalf("gpio %q not found", name)
+	}
+	if err := p.Out(gpio.High); err != nil {
+		log.Fatalf("gpio %q -> out: %v", name, err)
+	}
+	return p
+}
+
+func hwReset(rst gpio.PinOut) {
+	_ = rst.Out(gpio.High)
+	time.Sleep(10 * time.Millisecond)
+	_ = rst.Out(gpio.Low)
 	time.Sleep(20 * time.Millisecond)
-	if err := rst.Out(gpio.High); err != nil {
-		log.Fatal("RST high:", err)
+	_ = rst.Out(gpio.High)
+	time.Sleep(120 * time.Millisecond)
+}
+
+func currentState(lock string, t float64) State {
+	switch lock {
+	case "neutral":
+		return Neutral
+	case "speaking":
+		return Speaking
+	case "asleep":
+		return Asleep
 	}
-	time.Sleep(150 * time.Millisecond)
+	switch int(t/5) % 3 { // auto-cycle, 5s per mood
+	case 0:
+		return Neutral
+	case 1:
+		return Speaking
+	default:
+		return Asleep
+	}
+}
 
-	// ── Initialise each display ───────────────────────────────────────────
-	dispL := newDisplay(connL, dcL)
-	dispR := newDisplay(connR, dcR)
-	log.Println("legoeyes: init left display (mouth)")
-	dispL.Init()
-	log.Println("legoeyes: init right display (eye)")
-	dispR.Init()
-	log.Println("legoeyes: displays ready")
+func initDisplay(lock *string) {
+	eyePort := flag.String("eye", "SPI0.0", "SPI port for the eye display")
+	mouthPort := flag.String("mouth", "SPI0.1", "SPI port for the mouth display")
+	dcEyeName := flag.String("dc-eye", "GPIO22", "Data/Command GPIO for the eye display")
+	dcMouthName := flag.String("dc-mouth", "GPIO25", "Data/Command GPIO for the mouth display")
+	rstName := flag.String("rst", "GPIO27", "shared Reset GPIO")
+	hz := flag.Int("hz", 40, "SPI clock in MHz")
+	fps := flag.Int("fps", 45, "target frames per second")
+	flag.Parse()
 
-	// ── Pre-allocate frame buffers (reused every frame) ───────────────────
-	bufL := make([]byte, frameSize) // mouth frame
-	bufR := make([]byte, frameSize) // eye frame
+	if _, err := host.Init(); err != nil {
+		log.Fatalf("periph init: %v", err)
+	}
 
-	// ── Animators ─────────────────────────────────────────────────────────
-	mouthAnim := NewMouthAnimator() // drives left display
-	eyeAnim := NewAnimator(0.0)     // drives right display
+	dcEye := mustPinOut(*dcEyeName)
+	dcMouth := mustPinOut(*dcMouthName)
+	rst := mustPinOut(*rstName)
 
-	// ── Render / push loop (~30 fps) ──────────────────────────────────────
-	ticker := time.NewTicker(time.Second / time.Duration(targetFPS))
-	defer ticker.Stop()
+	eye := openDisplay(*eyePort, *hz, dcEye)
+	mouth := openDisplay(*mouthPort, *hz, dcMouth)
+	defer eye.close()
+	defer mouth.close()
+	log.Printf("eye=%s mouth=%s @ %dMHz", *eyePort, *mouthPort, *hz)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	hwReset(rst) // shared reset, then init each panel
+	eye.sendInit()
+	mouth.sendInit()
 
-	var curState AnimState
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
+	start := time.Now()
+	frame := time.Second / time.Duration(*fps)
 	for {
 		select {
-
-		case <-sigCh:
-			log.Println("legoeyes: shutting down")
+		case <-sig:
+			eye.canvas.clear(colBg)
+			eye.flush()
+			mouth.canvas.clear(colBg)
+			mouth.flush()
+			log.Println("bye")
 			return
+		default:
+		}
 
-		case s := <-stateCh:
-			if s != curState {
-				curState = s
-				log.Printf("legoeyes: → %s", curState)
-				mouthAnim.SetState(s)
-				eyeAnim.SetState(s)
-			}
+		now := time.Now()
+		t := now.Sub(start).Seconds()
+		st := currentState(*lock, t)
+		drawEye(eye.canvas, st, t)
+		drawMouth(mouth.canvas, st, t)
+		eye.flush()
+		mouth.flush()
 
-		case <-ticker.C:
-			mp := mouthAnim.Tick(frameDT)
-			ep := eyeAnim.Tick(frameDT)
-
-			RenderMouth(mp, bufL)
-			RenderEye(ep, bufR)
-
-			dispL.Flush(bufL)
-			dispR.Flush(bufR)
+		if d := frame - time.Since(now); d > 0 {
+			time.Sleep(d)
 		}
 	}
 }
