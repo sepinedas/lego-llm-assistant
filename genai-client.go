@@ -121,14 +121,12 @@ func handleWebSearch(ctx context.Context, tc *tavily.Client, query string) strin
 	return sb.String()
 }
 
-func Session(ctx context.Context, onResponse func(data []byte), onSleepCall func(), onWebSearchCall func(finish bool), audio <-chan []byte, end chan<- bool) (*genai.Session, error) {
+func Session(ctx context.Context) (*genai.Session, error) {
 	model := "gemini-3.1-flash-live-preview"
 	client, err := genai.NewClient(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	tavilyClient := newTavilyClient()
 
 	session, err := client.Live.Connect(ctx, model, &genai.LiveConnectConfig{
 		ResponseModalities: []genai.Modality{genai.ModalityAudio},
@@ -159,121 +157,120 @@ func Session(ctx context.Context, onResponse func(data []byte), onSleepCall func
 		return nil, err
 	}
 
-	go func() {
-		for {
-			select {
-			case data := <-audio:
-				err := session.SendRealtimeInput(genai.LiveRealtimeInput{
-					Audio: &genai.Blob{
-						MIMEType: "audio/pcm;rate=16000",
-						Data:     data,
-					},
-				})
-				if err != nil {
-					// don't panic; tell the caller the session ended
-					fmt.Printf("Error sending audio: %v\n", err)
-					end <- true
-					return
-				}
-			case <-ctx.Done():
-				session.Close()
-				return
-			}
-		}
-	}()
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				session.Close()
-				return
-			default:
-				response, err := session.Receive()
-				if err != nil {
-					// don't panic; log and signal end so main can decide to restart the session
-					fmt.Printf("Error receiving server response: %v\n", err)
-					end <- true
-					return
-				}
-				if response.GoAway != nil {
-					fmt.Println("Closing session")
-					end <- true
-					return
-				}
-
-				if response.ToolCall != nil {
-					for _, fc := range response.ToolCall.FunctionCalls {
-						switch fc.Name {
-
-						case "endSession":
-							confirmed := extractConfirmed(fc.Args)
-							fmt.Printf("\n[llamada a herramienta] endSession(confirmed=%v)\n", confirmed)
-							_ = session.SendToolResponse(genai.LiveToolResponseInput{
-								FunctionResponses: []*genai.FunctionResponse{
-									{
-										ID:   fc.ID,
-										Name: fc.Name,
-										Response: map[string]any{
-											"status": "ok",
-										},
-									},
-								},
-							})
-							onSleepCall()
-
-						case "getCurrentTime":
-							loc, err := time.LoadLocation("America/Costa_Rica")
-							var now time.Time
-							if err != nil {
-								now = time.Now()
-							} else {
-								now = time.Now().In(loc)
-							}
-							timeStr := now.Format("2006-01-02 15:04:05 Mon")
-							fmt.Printf("\n[llamada a herramienta] getCurrentTime() -> %s\n", timeStr)
-							_ = session.SendToolResponse(genai.LiveToolResponseInput{
-								FunctionResponses: []*genai.FunctionResponse{
-									{
-										ID:   fc.ID,
-										Name: fc.Name,
-										Response: map[string]any{
-											"currentTime": timeStr,
-										},
-									},
-								},
-							})
-
-						case "webSearch":
-							onWebSearchCall(false)
-							query, _ := fc.Args["query"].(string)
-							answer := handleWebSearch(ctx, tavilyClient, query)
-							_ = session.SendToolResponse(genai.LiveToolResponseInput{
-								FunctionResponses: []*genai.FunctionResponse{
-									{
-										ID:   fc.ID,
-										Name: fc.Name,
-										Response: map[string]any{
-											"answer": answer,
-										},
-									},
-								},
-							})
-							onWebSearchCall(true)
-						}
-					}
-				}
-
-				if response.ServerContent != nil && response.ServerContent.ModelTurn != nil {
-					for _, part := range response.ServerContent.ModelTurn.Parts {
-						if part.InlineData != nil {
-							onResponse(part.InlineData.Data)
-						}
-					}
-				}
-			}
-		}
-	}()
-
 	return session, nil
+}
+
+func handleSendAudio(ctx context.Context, session genai.Session, audio <-chan []byte, endSession <-chan bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-endSession:
+			return
+		case data := <-audio:
+			err := session.SendRealtimeInput(genai.LiveRealtimeInput{
+				Audio: &genai.Blob{
+					MIMEType: "audio/pcm;rate=16000",
+					Data:     data,
+				},
+			})
+			if err != nil {
+				// don't panic; tell the caller the session ended
+				fmt.Printf("Error sending audio: %v\n", err)
+			}
+		}
+	}
+}
+
+func handleReceiveMessages(ctx context.Context, session genai.Session, onResponse func(data []byte), onSleepCall func(), onWebSearchCall func(finish bool), endSession chan<- bool) {
+	tavilyClient := newTavilyClient()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			response, err := session.Receive()
+			if err != nil {
+				// don't panic; log and signal end so main can decide to restart the session
+				fmt.Printf("Error receiving server response: %v\n", err)
+				endSession <- true
+				return
+			}
+			if response.GoAway != nil {
+				fmt.Println("GoAway received")
+				endSession <- true
+				return
+			}
+
+			if response.ToolCall != nil {
+				for _, fc := range response.ToolCall.FunctionCalls {
+					switch fc.Name {
+
+					case "endSession":
+						confirmed := extractConfirmed(fc.Args)
+						fmt.Printf("\n[llamada a herramienta] endSession(confirmed=%v)\n", confirmed)
+						_ = session.SendToolResponse(genai.LiveToolResponseInput{
+							FunctionResponses: []*genai.FunctionResponse{
+								{
+									ID:   fc.ID,
+									Name: fc.Name,
+									Response: map[string]any{
+										"status": "ok",
+									},
+								},
+							},
+						})
+						onSleepCall()
+
+					case "getCurrentTime":
+						loc, err := time.LoadLocation("America/Costa_Rica")
+						var now time.Time
+						if err != nil {
+							now = time.Now()
+						} else {
+							now = time.Now().In(loc)
+						}
+						timeStr := now.Format("2006-01-02 15:04:05 Mon")
+						fmt.Printf("\n[llamada a herramienta] getCurrentTime() -> %s\n", timeStr)
+						_ = session.SendToolResponse(genai.LiveToolResponseInput{
+							FunctionResponses: []*genai.FunctionResponse{
+								{
+									ID:   fc.ID,
+									Name: fc.Name,
+									Response: map[string]any{
+										"currentTime": timeStr,
+									},
+								},
+							},
+						})
+
+					case "webSearch":
+						onWebSearchCall(false)
+						query, _ := fc.Args["query"].(string)
+						answer := handleWebSearch(ctx, tavilyClient, query)
+						_ = session.SendToolResponse(genai.LiveToolResponseInput{
+							FunctionResponses: []*genai.FunctionResponse{
+								{
+									ID:   fc.ID,
+									Name: fc.Name,
+									Response: map[string]any{
+										"answer": answer,
+									},
+								},
+							},
+						})
+						onWebSearchCall(true)
+					}
+				}
+			}
+
+			if response.ServerContent != nil && response.ServerContent.ModelTurn != nil {
+				for _, part := range response.ServerContent.ModelTurn.Parts {
+					if part.InlineData != nil {
+						onResponse(part.InlineData.Data)
+					}
+				}
+			}
+		}
+	}
 }
