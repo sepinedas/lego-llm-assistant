@@ -63,7 +63,7 @@ var webSearchTool = &genai.Tool{
 	FunctionDeclarations: []*genai.FunctionDeclaration{
 		{
 			Name:        "webSearch",
-			Description: "Busca información actualizada en internet cuando no sabes la respuesta a una pregunta. Úsala para noticias, datos recientes, preguntas de cultura general, o cualquier tema que no conozcas con certeza.",
+			Description: "Busca información actualizada en internet cuando no sabes la respuesta a una pregunta. Úsala para noticias, datos recientes, preguntas de cultura general, o cualquier tema que n[...]",
 			Parameters: &genai.Schema{
 				Type: genai.TypeObject,
 				Properties: map[string]*genai.Schema{
@@ -150,7 +150,7 @@ func Session(ctx context.Context, onResponse func(data []byte), onSleepCall func
 					No digas palabras de despedida antes de llamar a la herramienta; simplemente llámala.
 					Si te preguntan la hora o fecha actual, utiliza la herramienta getCurrentTime.
 					Si no sabes la respuesta a una pregunta o necesitas información actualizada,
-					utiliza la herramienta webSearch para buscarla en internet antes de responder.`},
+					dile al usuario que vas a buscar en internet, luego utiliza la herramienta webSearch para buscarla en internet antes de responder.`},
 			},
 		},
 		Tools: []*genai.Tool{disableSpeechTool, getCurrentTimeTool, webSearchTool},
