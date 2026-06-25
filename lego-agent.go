@@ -2,15 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/smallnest/ringbuffer"
+	"google.golang.org/genai"
 )
 
 const commandTimeout = 3 * time.Second
@@ -26,6 +28,7 @@ func main() {
 	isMicOpen := false
 	isCommandOpen := false
 	fatialState := flag.String("state", "asleep", "")
+	baseFatialState := *fatialState
 
 	go initDisplay(fatialState)
 
@@ -47,9 +50,10 @@ func main() {
 		isMicOpen = active
 		if active {
 			fmt.Println("Speech enabled.")
-			*fatialState = "neutral"
+			baseFatialState = "neutral"
 		} else {
 			fmt.Println("Speech disabled.")
+			baseFatialState = "asleep"
 			*fatialState = "asleep"
 		}
 	}
@@ -73,16 +77,12 @@ func main() {
 	defer showCommandEnabled(false)
 
 	go func() {
-		*fatialState = "asleep"
-	}()
-
-	go func() {
 		for {
 			for !rb.IsEmpty() {
 				*fatialState = "speaking"
 			}
 			if isMicOpen {
-				*fatialState = "neutral"
+				*fatialState = baseFatialState
 			}
 		}
 	}()
@@ -91,21 +91,56 @@ func main() {
 		for {
 			select {
 			case <-startSession:
-				session, err := Session(ctx, func(data []byte) { rb.Write(data) }, func() {
-					rb.Reset()
-					enableSpeech(false)
-				}, inAudio, endSession)
-				enableSpeech(true)
-				if err != nil {
-					log.Panic(err)
+				const maxAttempts = 4
+				var session *genai.Session
+				var err error
+				backoff := 500 * time.Millisecond
+
+				for attempt := 1; attempt <= maxAttempts; attempt++ {
+					session, err = Session(ctx, func(data []byte) { rb.Write(data) }, func() {
+						rb.Reset()
+						enableSpeech(false)
+					},
+						func(finish bool) {
+							if finish {
+								baseFatialState = "neutral"
+							} else {
+								baseFatialState = "thinking"
+							}
+						},
+						inAudio, endSession)
+					if err == nil {
+						break
+					}
+
+					// log and decide whether to retry
+					fmt.Printf("failed to open session (attempt %d/%d): %v\n", attempt, maxAttempts, err)
+					// simple heuristic: if the error message mentions "expired" or "token", retry after backoff
+					lerr := strings.ToLower(err.Error())
+					if strings.Contains(lerr, "expired") || strings.Contains(lerr, "token") || errors.Is(err, context.DeadlineExceeded) {
+						time.Sleep(backoff)
+						backoff *= 2
+						continue
+					}
+
+					// otherwise give up immediately
+					break
 				}
+
+				if err != nil {
+					fmt.Printf("Could not start session: %v\n", err)
+					enableSpeech(false)
+					continue
+				}
+
+				enableSpeech(true)
 				fmt.Println("Opening new session.")
 				<-endSession
 				fmt.Println("Closing session.")
 				enableSpeech(false)
 				err = session.Close()
 				if err != nil {
-					log.Panic(err)
+					fmt.Printf("error closing session: %v\n", err)
 				}
 			case <-ctx.Done():
 				return

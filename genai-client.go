@@ -121,7 +121,7 @@ func handleWebSearch(ctx context.Context, tc *tavily.Client, query string) strin
 	return sb.String()
 }
 
-func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(), audio <-chan []byte, end chan<- bool) (*genai.Session, error) {
+func Session(ctx context.Context, onResponse func(data []byte), onSleepCall func(), onWebSearchCall func(finish bool), audio <-chan []byte, end chan<- bool) (*genai.Session, error) {
 	model := "gemini-3.1-flash-live-preview"
 	client, err := genai.NewClient(ctx, nil)
 	if err != nil {
@@ -170,7 +170,9 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 					},
 				})
 				if err != nil {
-					log.Panic("Error sending audio: %v", err)
+					// don't panic; tell the caller the session ended
+					fmt.Printf("Error sending audio: %v\n", err)
+					end <- true
 					return
 				}
 			case <-ctx.Done():
@@ -189,7 +191,9 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 			default:
 				response, err := session.Receive()
 				if err != nil {
-					log.Panic("Error receiving server response: %v", err)
+					// don't panic; log and signal end so main can decide to restart the session
+					fmt.Printf("Error receiving server response: %v\n", err)
+					end <- true
 					return
 				}
 				if response.GoAway != nil {
@@ -216,7 +220,7 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 									},
 								},
 							})
-							onToolCall()
+							onSleepCall()
 
 						case "getCurrentTime":
 							loc, err := time.LoadLocation("America/Costa_Rica")
@@ -241,6 +245,7 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 							})
 
 						case "webSearch":
+							onWebSearchCall(false)
 							query, _ := fc.Args["query"].(string)
 							answer := handleWebSearch(ctx, tavilyClient, query)
 							_ = session.SendToolResponse(genai.LiveToolResponseInput{
@@ -254,6 +259,7 @@ func Session(ctx context.Context, onResponse func(data []byte), onToolCall func(
 									},
 								},
 							})
+							onWebSearchCall(true)
 						}
 					}
 				}

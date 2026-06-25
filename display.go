@@ -45,11 +45,9 @@ import (
 
 	"periph.io/x/conn/v3/gpio"
 	"periph.io/x/conn/v3/gpio/gpioreg"
-	"periph.io/x/conn/v3/gpio/gpiotest"
 	"periph.io/x/conn/v3/physic"
 	"periph.io/x/conn/v3/spi"
 	"periph.io/x/conn/v3/spi/spireg"
-	"periph.io/x/conn/v3/spi/spitest"
 	"periph.io/x/host/v3"
 )
 
@@ -191,6 +189,7 @@ const (
 	Neutral State = iota
 	Speaking
 	Asleep
+	Thinking
 )
 
 func drawEye(c *Canvas, st State, t float64) {
@@ -219,7 +218,8 @@ func drawEye(c *Canvas, st State, t float64) {
 
 	blink := 0.0
 	lookX, lookY := 0, 0
-	brow := 0.25 // eyebrow raise
+	brow := 0.25    // eyebrow raise
+	browTilt := 0.0 // +ve = right end higher (furrowed inward)
 	switch st {
 	case Neutral:
 		if ph := math.Mod(t, 3.5); ph < 0.18 {
@@ -234,13 +234,40 @@ func drawEye(c *Canvas, st State, t float64) {
 		lookX = int(9 * math.Sin(t*1.5))
 		lookY = int(3 * math.Sin(t*6))
 		brow = 0.55 + 0.2*math.Sin(t*4) // lively raised brow while talking
+	case Thinking:
+		// slow blink every ~4 s
+		if ph := math.Mod(t, 4.2); ph < 0.22 {
+			blink = math.Sin(ph / 0.22 * math.Pi)
+		}
+		// gaze drifts up-left then occasionally flicks down-right as if scanning
+		phase := math.Mod(t, 5.0)
+		if phase < 3.5 {
+			// locked up-left
+			lookX = int(-28 + 3*math.Sin(t*0.4))
+			lookY = int(-22 + 2*math.Sin(t*0.5))
+		} else {
+			// quick flick down-right then back
+			f := (phase - 3.5) / 1.5
+			lookX = int(-28 + 46*math.Sin(f*math.Pi))
+			lookY = int(-22 + 30*math.Sin(f*math.Pi))
+		}
+		brow = 0.6                             // raised with concentration
+		browTilt = 0.55 + 0.08*math.Sin(t*2.1) // furrowed, twitches slightly
 	}
 
 	const er = 86
 
-	// eyebrow: a short convex-up cartoon arc above the eye
-	browTop := cy - er - 12 - int(brow*16)
-	c.curvedBeam(cx, browTop+74, 74, 7, deg(270-18), deg(270+18), colOutline, false)
+	// eyebrow: tilted cartoon arc. browTilt > 0 furrows the inner (right) end down.
+	browCy := cy - er - 12 - int(brow*16)
+	tiltPx := int(browTilt * 14) // vertical offset of the inner end
+	bx0 := cx - 52
+	bx1 := cx + 52
+	by0 := browCy + tiltPx // inner end (right side of brow)
+	by1 := browCy - tiltPx // outer end (left side of brow)
+	bmid := (by0 + by1) / 2
+	// draw brow as three thick stroked segments for a smooth angled look
+	c.stroke(bx0, by1, (bx0+bx1)/2, bmid-4, 7, colOutline)
+	c.stroke((bx0+bx1)/2, bmid-4, bx1, by0, 7, colOutline)
 
 	// eyeball: white with a bold black outline
 	c.fillCircle(cx, cy, er+6, colOutline)
@@ -389,6 +416,40 @@ func drawSmile(c *Canvas, open float64, yoff int) {
 	}
 }
 
+// drawPursedMouth renders a small side-shifted squiggly mouth for thinking.
+// It slowly drifts left/right and has a subtle squiggle that wriggles over time.
+func drawPursedMouth(c *Canvas, t float64) {
+	cx := W/2 + int(18*math.Sin(t*0.8)) // drifts left and right
+	cy := H/2 + 44
+
+	// outline shell
+	c.fillCircle(cx, cy, 26, colOutline)
+	// skin fill — a slightly squashed oval
+	for dy := -14; dy <= 14; dy++ {
+		xw := int(math.Sqrt(math.Max(0, float64(18*18-dy*dy*18*18/14/14))))
+		for dx := -xw; dx <= xw; dx++ {
+			px, py := cx+dx, cy+dy
+			if px >= 0 && px < W && py >= 0 && py < H {
+				c.pix[py*W+px] = colSkin
+			}
+		}
+	}
+
+	// three-point squiggle line across the mouth
+	pts := [4][2]int{
+		{cx - 18, cy + int(5*math.Sin(t*3.1+0))},
+		{cx - 6, cy + int(6*math.Sin(t*3.1+1.2))},
+		{cx + 6, cy + int(6*math.Sin(t*3.1+2.4))},
+		{cx + 18, cy + int(5*math.Sin(t*3.1+3.6))},
+	}
+	for i := 0; i < 3; i++ {
+		c.stroke(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], 4, colOutline)
+	}
+
+	// small highlight dot at upper-right to give it a cartoon lip volume
+	c.fillCircle(cx+8, cy-6, 4, colSkinSh)
+}
+
 func drawMouth(c *Canvas, st State, t float64) {
 	c.clear(colSkin)
 
@@ -405,6 +466,8 @@ func drawMouth(c *Canvas, st State, t float64) {
 	case Asleep:
 		yoff := int(2 * math.Sin(t*1.6)) // gentle breathing
 		drawSmile(c, 0.0, yoff)          // peaceful closed smile
+	case Thinking:
+		drawPursedMouth(c, t)
 	}
 }
 
@@ -483,14 +546,7 @@ type Display struct {
 }
 
 func openDisplay(name string, mhz int, dc gpio.PinOut) *Display {
-	var p spi.PortCloser
-	var err error
-	if os.Getenv("ENV") == "local" {
-		log.Println("Running on PC: Using empty mock SPI port")
-		p = &spitest.Record{}
-	} else {
-		p, err = spireg.Open(name)
-	}
+	p, err := spireg.Open(name)
 	if err != nil {
 		log.Fatalf("open %s: %v", name, err)
 	}
@@ -569,7 +625,7 @@ func (d *Display) close() { _ = d.port.Close() }
 // GPIO helpers and main loop
 // ---------------------------------------------------------------------------
 
-func mustPinOut(name string) gpio.PinIO {
+func mustPinOut(name string) gpio.PinOut {
 	p := gpioreg.ByName(name)
 	if p == nil {
 		log.Fatalf("gpio %q not found", name)
@@ -597,14 +653,18 @@ func currentState(lock string, t float64) State {
 		return Speaking
 	case "asleep":
 		return Asleep
+	case "thinking":
+		return Thinking
 	}
-	switch int(t/5) % 3 { // auto-cycle, 5s per mood
+	switch int(t/5) % 4 { // auto-cycle, 5s per mood
 	case 0:
 		return Neutral
 	case 1:
 		return Speaking
-	default:
+	case 2:
 		return Asleep
+	default:
+		return Thinking
 	}
 }
 
@@ -615,40 +675,16 @@ func initDisplay(lock *string) {
 	dcMouthName := flag.String("dc-mouth", "GPIO25", "Data/Command GPIO for the mouth display")
 	rstName := flag.String("rst", "GPIO27", "shared Reset GPIO")
 	hz := flag.Int("hz", 40, "SPI clock in MHz")
-	fps := flag.Int("fps", 45, "target frames per second")
+	fps := flag.Int("fps", 30, "target frames per second")
 	flag.Parse()
-
-	var dcEye gpio.PinIO
-	var dcMouth gpio.PinIO
-	var rst gpio.PinIO
 
 	if _, err := host.Init(); err != nil {
 		log.Fatalf("periph init: %v", err)
 	}
 
-	if os.Getenv("ENV") == "local" {
-		log.Println("Running on PC: Using empty mock SPI port")
-
-		dcEye = &gpiotest.Pin{
-			N:   *dcEyeName,
-			Num: 22,
-			Fn:  "I/O",
-		}
-		dcMouth = &gpiotest.Pin{
-			N:   *dcMouthName,
-			Num: 25,
-			Fn:  "I/O",
-		}
-		rst = &gpiotest.Pin{
-			N:   *rstName,
-			Num: 27,
-			Fn:  "I/O",
-		}
-	} else {
-		dcEye = mustPinOut(*dcEyeName)
-		dcMouth = mustPinOut(*dcMouthName)
-		rst = mustPinOut(*rstName)
-	}
+	dcEye := mustPinOut(*dcEyeName)
+	dcMouth := mustPinOut(*dcMouthName)
+	rst := mustPinOut(*rstName)
 
 	eye := openDisplay(*eyePort, *hz, dcEye)
 	mouth := openDisplay(*mouthPort, *hz, dcMouth)
