@@ -74,8 +74,8 @@ var (
 	colCatch   = rgb(245, 248, 255) // catchlight
 	colPink    = rgb(235, 120, 130) // rosy cheeks
 	colPink2   = rgb(250, 178, 184) // cheek / tongue highlight
-	colSkin    = rgb(255, 205, 70)  // cartoon "skin" filling each screen
-	colSkinSh  = rgb(232, 176, 48)  // skin shadow / lip highlight
+	colSkin    = rgb(250, 165, 55)  // cartoon "skin" filling each screen
+	colSkinSh  = rgb(235, 155, 38)  // skin shadow / lip highlight
 	colOutline = rgb(30, 26, 34)    // bold cartoon outline
 	colWhite   = rgb(250, 250, 252) // eyeball / teeth
 	colMouthIn = rgb(124, 36, 48)   // open-mouth interior
