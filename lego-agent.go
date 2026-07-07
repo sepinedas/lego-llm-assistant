@@ -7,13 +7,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/smallnest/ringbuffer"
 	"google.golang.org/genai"
 )
-
-const commandTimeout = 3 * time.Second
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -24,26 +21,17 @@ func main() {
 	recMaya := VoskRecognizer(InputSampleRate, `["maya"]`)
 
 	isMicOpen := false
-	isCommandOpen := false
 	fatialState := flag.String("state", "asleep", "")
 	baseFatialState := *fatialState
 
 	go initDisplay(fatialState)
 
-	timer := time.NewTimer(0)
-
-	Playback(rb, &isCommandOpen)
+	Playback(rb)
 
 	inAudio := make(chan []byte, 1)
 	startSession := make(chan bool)
 
 	enableSpeech := func(active bool) {
-		if isMicOpen && active {
-			isCommandOpen = true
-			timer.Reset(commandTimeout)
-			fmt.Println("Command enabled.")
-			showCommandEnabled(true)
-		}
 		isMicOpen = active
 		if active {
 			fmt.Println("Speech enabled.")
@@ -56,7 +44,7 @@ func main() {
 	}
 
 	handleInputAudio := func(data []byte, framecount uint32) {
-		if (rb.IsEmpty() && isMicOpen) || isCommandOpen {
+		if isMicOpen {
 			inAudio <- data
 		}
 		Recognize(recMaya, data, func(text string) {
@@ -70,8 +58,6 @@ func main() {
 		})
 	}
 	Capture(handleInputAudio, InputSampleRate)
-
-	defer showCommandEnabled(false)
 
 	go func() {
 		for {
@@ -136,18 +122,6 @@ func main() {
 				}
 			case <-ctx.Done():
 				return
-			}
-		}
-	}()
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-timer.C:
-				isCommandOpen = false
-				showCommandEnabled(false)
 			}
 		}
 	}()

@@ -65,7 +65,7 @@ func Capture(cb func([]byte, uint32), sampleRate uint32) {
 	fmt.Println("Recording...")
 }
 
-func Playback(playBuffer *ringbuffer.RingBuffer, isCommandOpen *bool) {
+func Playback(playBuffer *ringbuffer.RingBuffer) {
 	ctx, err := malgo.InitContext(nil, malgo.ContextConfig{}, func(message string) {
 		fmt.Printf("LOG <%v>\n", message)
 	})
@@ -75,14 +75,12 @@ func Playback(playBuffer *ringbuffer.RingBuffer, isCommandOpen *bool) {
 	}
 	onSendFrames := func(pOutput, nil []byte, framecount uint32) {
 		// Read only as much as malgo needs for this frame
-		if !(*isCommandOpen) {
-			n, _ := playBuffer.Read(pOutput)
+		n, _ := playBuffer.Read(pOutput)
 
-			// Fill remaining with silence if buffer is empty to avoid noise
-			if n < len(pOutput) {
-				for i := n; i < len(pOutput); i++ {
-					pOutput[i] = 0
-				}
+		// Fill remaining with silence if buffer is empty to avoid noise
+		if n < len(pOutput) {
+			for i := n; i < len(pOutput); i++ {
+				pOutput[i] = 0
 			}
 		}
 	}
