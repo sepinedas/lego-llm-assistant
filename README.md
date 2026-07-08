@@ -1,10 +1,10 @@
 # LEGO LLM Assistant
 
-An intelligent voice-controlled LEGO robot powered by Large Language Models (LLMs) and speech recognition. This project combines hardware control with advanced AI to create an interactive robotic assistant with expressive display faces.
+An intelligent voice-controlled LEGO robot powered by Large Language Models (LLMs) and speech recognition. This project combines hardware control with advanced AI to create an interactive robotic assistant.
 
 ## Overview
 
-The LEGO LLM Assistant is a Go-based application that enables voice interaction with LEGO hardware through AI-powered natural language processing. The system captures audio input, processes it through speech recognition, sends queries to Google's Generative AI API, and controls displays based on AI responses.
+The LEGO LLM Assistant is a Go-based application that enables voice interaction with LEGO hardware through AI-powered natural language processing. The system captures audio input, processes it through speech-to-text, integrates with Google's Generative AI, and displays emotional reactions on expressive LED displays.
 
 ## Features
 
@@ -194,13 +194,69 @@ Refer to `periph.go` for detailed GPIO/SPI/I2C pin assignments.
 
 ## Configuration
 
-Key configuration parameters (typically in environment or config file):
+The project includes several configuration files for different aspects of the system:
 
-- `GOOGLE_API_KEY` - API key for Google Generative AI
-- `WAKE_WORD_MODEL` - Path to wake word detection model
-- Audio device selection for input/output
-- Display dimensions and parameters
-- Emotion-to-display-pattern mapping
+### config.txt (Raspberry Pi Boot Configuration)
+
+Located at the root, this is the Raspberry Pi `/boot/firmware/config.txt` file. Key settings:
+
+```
+# Hardware interfaces
+dtparam=i2c_arm=on          # I2C for display control
+dtparam=i2s=on              # I2S for audio
+dtoverlay=spi0-2cs          # SPI configuration
+
+# Display and video
+display_auto_detect=1       # Auto-detect connected displays
+camera_auto_detect=1        # Auto-detect camera if present
+dtoverlay=vc4-kms-v3d       # Enable DRM VC4 V3D driver
+disable_overscan=1          # Disable display overscan
+
+# Performance
+arm_64bit=1                 # Run in 64-bit mode
+arm_boost=1                 # Boost performance
+
+# Audio hardware overlay
+dtoverlay=max98357a         # Amplifier DAC overlay for speaker output
+```
+
+**Installation**: Copy this file to `/boot/firmware/config.txt` on your Raspberry Pi and reboot.
+
+### asound.conf (ALSA Audio Configuration)
+
+Located at the root, this configures ALSA (Advanced Linux Sound Architecture) for audio processing.
+
+```
+defaults.pcm.rate_converter "samplerate"  # Use high-quality resampling
+
+pcm.!default {
+    type asym                              # Asymmetric plugin (separate playback/capture)
+    playback.pcm "cards.pcm.default"       # Default playback device
+    capture.pcm "plug:rnnoise"             # Capture with RNNoise noise reduction
+}
+```
+
+**Features**:
+- Uses `samplerate` for high-quality audio resampling (better than speexdsp)
+- Asymmetric PCM for simultaneous independent playback and capture
+- RNNoise integration for real-time noise reduction during microphone input
+- Unique IPC key management for dmix/dsnoop plugins
+
+**Installation**: Copy or merge this file to `/etc/asound.conf` or `~/.asoundrc` on your system.
+
+### Key Configuration Parameters
+
+Environment variables and runtime settings:
+
+| Parameter | Location | Description |
+|-----------|----------|-------------|
+| `GOOGLE_API_KEY` | Environment | API key for Google Generative AI |
+| `WAKE_WORD_MODEL` | Environment or code | Path to wake word detection model |
+| I2C Bus | `config.txt` | Default: Bus 1 for displays |
+| SPI Bus | `config.txt` & `periph.go` | For display communication |
+| Audio Devices | `asound.conf` | Microphone capture and speaker playback |
+| Display Dimensions | `display.go` | Pixel dimensions for each display |
+| Emotion Mapping | `display.go` | Display patterns for each emotion |
 
 ## API Integration
 
@@ -246,6 +302,8 @@ lego-llm-assistant/
 ├── wake-model.go                 # Wake word detection
 ├── periph.go                     # Hardware peripherals
 ├── go.mod / go.sum               # Dependency management
+├── config.txt                    # Raspberry Pi boot config
+├── asound.conf                   # ALSA audio configuration
 ├── deploy.sh                     # Deployment script
 ├── hardware/                     # Hardware designs and files
 │   ├── circuit_schematic.png     # Electrical schematic
@@ -264,6 +322,12 @@ Use the included deployment script:
 
 This automates the build and deployment to your target Raspberry Pi system.
 
+Before deployment, ensure:
+1. Copy `config.txt` to `/boot/firmware/config.txt` and reboot
+2. Copy `asound.conf` to `/etc/asound.conf`
+3. Set `GOOGLE_API_KEY` environment variable
+4. Run `./deploy.sh` to build and transfer the binary
+
 ## Development
 
 ### Building from Source
@@ -281,7 +345,7 @@ Modify the relevant `.go` files to enable verbose logging:
 ### Hardware Testing
 
 Test individual hardware components using functions in:
-- **`lego-agent.go`** - Main speca and display control
+- **`lego-agent.go`** - Main control and display control
   ```go
   // Test left arm movement
   moveLeftArm(speed, duration)
@@ -307,6 +371,7 @@ Test individual hardware components using functions in:
 - Optimize display refresh rates in `display.go`
 - Profile audio buffer sizes in `audio.go`
 - Monitor API response times in `genai-client.go`
+- Verify ALSA configuration in `asound.conf` for audio quality
 
 ## Troubleshooting
 
@@ -315,11 +380,20 @@ Test individual hardware components using functions in:
 - Check `malgo` package for compatible audio devices
 - Test microphone: `arecord -d 5 test.wav && aplay test.wav`
 - Adjust audio buffer size in `audio.go` if choppy
+- Check ALSA configuration: `cat /proc/asound/cards`
+- Test RNNoise filtering with: `arecord -D plug:rnnoise test.wav`
+
+### Configuration Issues
+- Verify `config.txt` is in correct location: `/boot/firmware/config.txt`
+- Reboot after modifying `config.txt`: `sudo reboot`
+- Check Raspberry Pi firmware: `vcgencmd version`
+- Verify ALSA config loaded: `alsactl info`
 
 ### Hardware Connection
 - Confirm SPI/I2C bus is enabled: `i2cdetect -y 1`
 - Check pin assignments in `periph.go` match PCB labels
 - Verify power supply voltage: should be 5V ±0.2V
+- Test I2C devices: `i2cdetect -y 1`
 
 ### Display Issues
 - Verify I2C addresses for each display module
@@ -387,7 +461,7 @@ For questions or support, please open an issue in the repository.
 ---
 
 **Project Status**: Active Development  
-**Last Updated**: June 2026  
+**Last Updated**: July 2026  
 **Language**: Go (99.5%), Shell (0.5%)  
 **Assembled Robot**: Operational with expressive displays
 **PCB Board**: "Maya" control board - fully integrated and tested
